@@ -1,0 +1,74 @@
+/**
+ * 解析 / 格式破坏用例（PLAN §8 用例 8、9、19b）+ 首块约束。
+ * 题面硬约束：格式损坏或元数据无法解析**必须报错**，绝不判为可用。
+ */
+
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+
+import { blockOf, cli, docPath, freshRepo, parseJson, readText, writeText } from './helpers.ts';
+
+test('用例 8：块未闭合 → 退出码 2，错误信息含行号', async () => {
+  const { repo } = await freshRepo();
+  const raw = readText(docPath(repo));
+  const corrupt = `${raw}<!-- gmd:block {"id":"bX","hist":[]} -->\n这一块永远不会闭合\n`;
+  writeText(docPath(repo), corrupt);
+
+  const res = await cli(['read', 'docs/api.gmd', '--repo', repo]);
+  assert.equal(res.code, 2, `应为格式损坏，实际 ${res.code}`);
+  assert.match(res.err, /未闭合/);
+  assert.match(res.err, /第 \d+ 行/);
+  assert.equal(res.out.trim(), '', '格式损坏时 stdout 不应有内容（人类可读文字走 stderr）');
+});
+
+test('用例 9：块头 JSON 非法 → 退出码 2', async () => {
+  const { repo } = await freshRepo();
+  const raw = readText(docPath(repo));
+  const corrupted = raw.replace('<!-- gmd:block {"id":"b2"', '<!-- gmd:block {oops');
+  assert.notEqual(corrupted, raw, '替换必须生效，否则用例形同虚设');
+  writeText(docPath(repo), corrupted);
+
+  const res = await cli(['read', 'docs/api.gmd', '--repo', repo]);
+  assert.equal(res.code, 2);
+  assert.match(res.err, /JSON/);
+  assert.match(res.err, /第 \d+ 行/);
+});
+
+test('首块约束：文件第一个非空内容不是 gmd:doc → 退出码 2', async () => {
+  const { repo } = await freshRepo();
+  const original = readText(docPath(repo));
+
+  // (a) 前面出现了一个片段标记 ⇒ 第一个标记不是 doc
+  writeText(
+    docPath(repo),
+    `<!-- gmd:block {"id":"bZ","hist":[]} -->\n领先于文档头的片段\n<!-- /gmd:block -->\n\n${original}`,
+  );
+  const a = await cli(['read', 'docs/api.gmd', '--repo', repo]);
+  assert.equal(a.code, 2);
+  assert.match(a.err, /第一个非空内容必须是 gmd:doc 块/);
+
+  // (b) 文档头前面有普通正文 ⇒ 也不允许
+  writeText(docPath(repo), `随便写一行普通 Markdown\n${original}`);
+  const b = await cli(['read', 'docs/api.gmd', '--repo', repo]);
+  assert.equal(b.code, 2);
+  assert.match(b.err, /gmd:doc 块之前不允许出现内容/);
+  assert.match(b.err, /第 2 行/);
+});
+
+test('用例 19b：手改正文但不追加版本 → error（正文与元数据不一致），且不影响其它片段', async () => {
+  const { repo } = await freshRepo();
+  const raw = readText(docPath(repo));
+  const edited = raw.replace('按键取值。键不存在时返回 `null`，**不抛异常**。', '按键取值（手改，没有追加版本）。');
+  assert.notEqual(edited, raw, '替换必须生效');
+  writeText(docPath(repo), edited);
+
+  const res = await cli(['read', 'docs/api.gmd', '--json', '--repo', repo]);
+  assert.equal(res.code, 3, '存在 error 块 ⇒ read 退出码 3');
+  const payload = parseJson(res.out);
+  const b1 = blockOf(payload, 'b1');
+  assert.equal(b1.severity, 'error');
+  assert.equal(b1.reason, '正文与元数据不一致');
+  assert.equal(b1.currentSource, null, 'error 必须隐藏旧文字');
+  assert.deepEqual(b1.changes, []);
+  assert.equal(blockOf(payload, 'b2').severity, 'ok', '片段级独立');
+});
