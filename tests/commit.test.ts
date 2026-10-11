@@ -8,7 +8,7 @@ import { existsSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { KV_TS, commitAll } from '../scripts/setup-fixtures.ts';
+import { CONF_TS, KV_TS, commitAll } from '../scripts/setup-fixtures.ts';
 import { blockOf, cli, docPath, freshRepo, outsideText, parseJson, readText, srcPath, writeText } from './helpers.ts';
 
 const D = '2026-08-01T00:00:00Z';
@@ -235,4 +235,120 @@ test('用例 25：引用范围已不存在时 commit 必须拒写（码 4），�
   const after = blockOf(parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out), 'b1');
   assert.equal(after.severity, 'error', '关键回归：拒绝之后必须仍是 error，绝不能被洗成 ok');
   assert.equal(after.rev, 1, '不得凭空多出一个版本');
+});
+
+/**
+ * 用例 28（阶段 4 通路）：`commit --path / --range` **重新绑定引用** ⇒ 打通 `error` 档的闭环。
+ *
+ * 题面 §2.4：`error`（引用目标消失/整段被重写）= "必须重写"。但阶段 1–3 的 `range` 只能沿用旧范围，
+ * 旧来源已经没了 ⇒ 重写后**记不了新版本的来源**，只能拒写。`--path/--range` 让 AI 把引用改指到
+ * 仍存在的来源，于是"读 → 判断 → 重写 → 写回"在 `error` 档也能走完。
+ * 铁律：新版本记新 path/range，**历史版本各自的 path/range 不被改写**（历史只追加）。
+ */
+test('用例 28：来源被删的 error 块，用 --path/--range 重绑定到仍存在的来源 → 写回成功、回到 ok', async () => {
+  const { repo } = await freshRepo();
+  rmSync(srcPath(repo));
+  await commitAll(repo, 'case 28: 删除 b1/b2 的来源', D);
+
+  const before = blockOf(parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out), 'b1');
+  assert.equal(before.severity, 'error', '前置：来源被删 ⇒ error');
+  assert.equal(before.source.path, 'src/kv.ts');
+
+  // src/conf.ts 第 9–13 行仍存在（defaultConfig 定义），把 b1 改指过去
+  const res = await cli(
+    ['commit', 'docs/api.gmd', '--block', 'b1', '--repo', repo, '--path', 'src/conf.ts', '--range', '9..13', '--input', '-', '--json'],
+    { stdin: '## 重写后的接口说明\n\n来源已改为 `src/conf.ts` 的默认配置定义。\n' },
+  );
+  assert.equal(res.code, 0, `重绑定后应当能写回：${res.err}`);
+  const payload = parseJson(res.out) as { rev: number; range: [number, number]; path?: string };
+  assert.equal(payload.rev, 2);
+  assert.deepEqual(payload.range, [9, 13], '新版本记新范围');
+  assert.equal(payload.path, 'src/conf.ts', '重绑定时 --json 必须给出新 path');
+
+  const after = blockOf(parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out), 'b1');
+  assert.equal(after.severity, 'ok', '重绑定后闭环回到 ok');
+  assert.equal(after.rev, 2);
+  assert.deepEqual(after.source.path, 'src/conf.ts');
+  assert.deepEqual(after.source.range, [9, 13]);
+
+  // 历史只追加：rev1 仍记着旧来源（不被新绑定改写）
+  const hist = parseJson(
+    (await cli(['log', 'docs/api.gmd', '--block', 'b1', '--json', '--repo', repo])).out,
+  ) as Array<{ rev: number; path: string; range: [number, number] }>;
+  assert.deepEqual(hist.map((v) => v.rev), [1, 2]);
+  assert.equal(hist[0].path, 'src/kv.ts', '旧版本的来源不得被改写');
+  assert.deepEqual(hist[0].range, [10, 24]);
+  assert.equal(hist[1].path, 'src/conf.ts');
+  assert.deepEqual(hist[1].range, [9, 13]);
+
+  // 片段级独立：b2 没被重绑定，仍是 error
+  assert.equal(blockOf(parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out), 'b2').severity, 'error');
+});
+
+/**
+ * 用例 29：重绑定的边界与非法参数 —— 新来源照样要过"存在性 + 位置合法 + 不脏"三道门。
+ */
+test('用例 29：重绑定参数非法（码 1）、新来源不存在/越界（码 4）、新来源脏（码 4）', async () => {
+  const { repo } = await freshRepo();
+  rmSync(srcPath(repo));
+  await commitAll(repo, 'case 29: 删除 b1/b2 的来源', D);
+  const NEW = '## 重写正文\n\n内容。\n';
+  const commit = (extra: string[]) =>
+    cli(['commit', 'docs/api.gmd', '--block', 'b1', '--repo', repo, '--input', '-', ...extra], { stdin: NEW });
+
+  // 参数层（码 1）
+  const badRange = await commit(['--range', '5..2']);
+  assert.equal(badRange.code, 1, '--range 5..2 是参数错');
+  const zeroRange = await commit(['--range', '0..3']);
+  assert.equal(zeroRange.code, 1, '--range 0..3 是参数错');
+  const escape = await commit(['--path', '../outside.ts']);
+  assert.equal(escape.code, 1, '--path 逃出仓库是参数错');
+
+  // 目标来源层（码 4）
+  const missing = await commit(['--path', 'src/nope.ts']);
+  assert.equal(missing.code, 4);
+  assert.match(missing.err, /来源文件已不存在/);
+
+  const overRange = await commit(['--path', 'src/conf.ts', '--range', '9..999']);
+  assert.equal(overRange.code, 4, '新来源上越界的 range 同样必须拒写');
+  assert.match(overRange.err, /已不存在/);
+
+  // 新来源脏 ⇒ 默认拒（闸门必须落在**新**来源上，而不是旧的被删来源）
+  const conf = CONF_TS.split('\n');
+  conf[11] = '  port: 9090, // 未提交';
+  writeText(srcPath(repo, 'src/conf.ts'), conf.join('\n'));
+  const dirtyNewSource = await commit(['--path', 'src/conf.ts', '--range', '9..13']);
+  assert.equal(dirtyNewSource.code, 4);
+  assert.match(dirtyNewSource.err, /未提交修改/);
+
+  // 文档必须逐字节不变（三次拒写都没有半截写入）
+  assert.equal(blockOf(parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out), 'b1').rev, 1);
+});
+
+/**
+ * 用例 30（回归·闸门漏洞）：**手改正文**让块本身变成 `error`，不能因此绕过脏来源闸门。
+ *
+ * 修复前 `commit` 用 `judgeBlock(...).dirty` 取脏标记，而该函数在"正文与元数据不一致"等
+ * 步骤 0 场景会返回 `dirty = false` —— 于是"先把正文手改坏、再 commit"就能在**来源范围有未提交
+ * 修改**时照样写回，违反题面"引用范围内有未提交修改时…不允许写回"。
+ */
+test('用例 30：手改正文（块变 error）不得绕过脏来源闸门', async () => {
+  const { repo } = await freshRepo();
+  const lines = KV_TS.split('\n');
+  lines[14] = '  return null; // 范围内未提交改动';
+  writeText(srcPath(repo), lines.join('\n')); // 未提交 ⇒ 范围脏
+
+  const raw = readText(docPath(repo));
+  writeText(docPath(repo), raw.replace('按键取值。键不存在时返回 `null`，**不抛异常**。', '手改的正文（没有追加版本）'));
+  const broken = blockOf(parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out), 'b1');
+  assert.equal(broken.severity, 'error', '前置：手改正文 ⇒ 步骤 0 error');
+  assert.equal(broken.dirty, false, '判定引擎此时不报 dirty（正是漏洞的入口）');
+
+  const before = readText(docPath(repo));
+  const res = await cli(['commit', 'docs/api.gmd', '--block', 'b1', '--repo', repo, '--input', '-'], {
+    stdin: '## 重写正文\n\n内容。\n',
+  });
+  assert.equal(res.code, 4, '来源范围脏 ⇒ 即便块本身是 error 也必须拒写');
+  assert.match(res.err, /未提交修改/);
+  assert.equal(readText(docPath(repo)), before, '被拒时文件必须逐字节不变');
 });

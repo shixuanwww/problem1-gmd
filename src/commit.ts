@@ -4,15 +4,26 @@
  * 提交前依次通过：步骤 0（剥离草稿头）+ 五道校验，任一不过**拒绝写回**（CLI 映射为退出码 4）：
  *   1 正文非空；2 草稿 base_rev == 当前活动版本；3 来源未提交修改闸门（除非 --allow-dirty）；
  *   4 内容确有变化（不然就是造无效版本）；5 引用范围仍然存在（越界 ⇒ 拒写，防伪造成 ok）。
- * 通过后：重算 commit / src_hash（**沿用它记录的旧 range**）→ 追加 hist → 原子写（.tmp → rename）。
+ * 通过后：重算 commit / src_hash → 追加 hist → 原子写（.tmp → rename）。
+ *
+ * 目标来源 = 活动版本的 (path, range)，可用 `--path` / `--range` **重新绑定**（阶段 4 的
+ * "旧来源已消失 ⇒ 重写后写回"通路）。校验 3 与校验 5 一律针对**目标来源**判。
  */
 
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 
 import { normalizeNewlines, parseGmd, serializeGmd } from './format.ts';
 import { draftPathFor, nowIso, stripDraftHeader } from './edit.ts';
-import { SourceEncodingError, countLines, hashRange, readWorktreeText, revParseHead, textHash } from './gitrepo.ts';
-import { judgeBlock } from './judge.ts';
+import {
+  SourceEncodingError,
+  countLines,
+  hashRange,
+  isRangeDirtyTexts,
+  readWorktreeText,
+  revParseHead,
+  showText,
+  textHash,
+} from './gitrepo.ts';
 import type { GmdVersion } from './types.ts';
 
 /** 写回被拒（退出码 4）。 */
@@ -31,6 +42,10 @@ export interface CommitOptions {
   inputText: string;
   allowDirty?: boolean;
   at?: string;
+  /** 重新绑定引用：本版本改用这个来源路径（缺省沿用活动版本的 path）。必须是仓库内相对路径。 */
+  path?: string;
+  /** 重新绑定引用：本版本改用这个来源范围（缺省沿用活动版本的 range）。 */
+  range?: [number, number];
 }
 
 export interface CommitResult {
@@ -38,6 +53,8 @@ export interface CommitResult {
   rev: number;
   text_hash: string;
   range: [number, number];
+  /** 本次写回的来源路径（重新绑定时即新 path）。 */
+  path: string;
   note?: string;
   /** 本次写回是否基于未提交来源（仅 --allow-dirty 时可能为 true）。 */
   sourceDirty: boolean;
@@ -104,9 +121,51 @@ export async function commitBlock(opts: CommitOptions): Promise<CommitResult> {
   // ---- 校验 1：新正文非空 ----
   if (newBody.trim().length === 0) throw new CommitRejected('草稿正文为空');
 
-  // ---- 校验 3：来源未提交修改闸门（判定口径与 judge 完全一致）----
-  const judgement = await judgeBlock(block, opts.repo);
-  const dirty = judgement.dirty;
+  // ---- 本次要记录的来源：可能被 --path / --range **重新绑定** ----
+  // 阶段 4 的"重写后可写回"通路：旧来源（文件被删 / 整段被替换）已经没有出路，
+  // 只允许**改指到仍存在的来源**，新版本记新 path/range，历史版本各自的 path/range 不动。
+  const targetPath = opts.path ?? active.path;
+  const targetRange: [number, number] = opts.range ?? [active.range[0], active.range[1]];
+  if (
+    !Number.isInteger(targetRange[0]) ||
+    !Number.isInteger(targetRange[1]) ||
+    targetRange[0] < 1 ||
+    targetRange[1] < targetRange[0]
+  ) {
+    throw new CommitRejected(`引用范围非法: [${targetRange[0]}, ${targetRange[1]}]（须是 1-based 闭区间且 l0 <= l1）`);
+  }
+
+  // ---- 校验 5：目标范围必须真的存在（越界 ⇒ 拒写）----
+  // 🔒 越界闸门（P0 回归）：range 全在文件外时 hashRange 会**静默截断**成空串哈希，
+  // 沿用越界 range 就会写出"引用目标已消失、却自证与当前内容一致"的无效版本
+  // —— 下一次 read 会把它判成 ok（题面明确要求"绝不判为可用"）。宁拒不写。
+  // 来源文件已被删除 / 变成二进制时，这里会抛 CommitRejected（码 4），而不是裸 ENOENT（码 1）。
+  const srcText = await readSourceForCommit(opts.repo, targetPath);
+  const srcLineCount = countLines(srcText);
+  if (targetRange[1] > srcLineCount) {
+    throw new CommitRejected(
+      `引用范围 ${targetRange[0]}-${targetRange[1]} 已不存在（来源 ${targetPath} 现有 ${srcLineCount} 行），拒绝写入无法自洽的新版本；` +
+        '请用 --path / --range 把引用指向仍存在的来源范围',
+    );
+  }
+
+  // ---- 校验 3：来源未提交修改闸门（对**目标来源**判，而不是拿被判定的旧来源）----
+  // 为什么不再调 judgeBlock(block)：重绑定后闸门要落在新来源上；而且 judgeBlock 在"正文与元数据
+  // 不一致"等步骤 0 场景会返回 dirty=false —— 那等于"先手改正文就能绕过脏来源闸门"。
+  // 这里直接用 §4.3 步骤 3 的同一组原语（showText + isRangeDirtyTexts）算，口径不变但不漏判。
+  let headText: string | null;
+  try {
+    headText = await showText(opts.repo, 'HEAD', targetPath);
+  } catch (e) {
+    if (e instanceof SourceEncodingError) {
+      throw new CommitRejected(
+        `来源在 HEAD 中不是 UTF-8 文本，无法比较是否已提交: ${targetPath}（确需写入请显式加 --allow-dirty）`,
+      );
+    }
+    throw e;
+  }
+  // `git show HEAD:<path>` 取不到（仓库没有 HEAD，或该路径不在 HEAD 里）⇒ 视为未提交修改。
+  const dirty = headText === null ? true : isRangeDirtyTexts(srcText, headText, targetRange);
   if (dirty && opts.allowDirty !== true) {
     throw new CommitRejected('来源存在未提交修改，默认拒绝写入（确需写入请显式加 --allow-dirty）');
   }
@@ -115,30 +174,17 @@ export async function commitBlock(opts: CommitOptions): Promise<CommitResult> {
   const newHash = textHash(newBody);
   if (newHash === active.text_hash) throw new CommitRejected('内容未变化');
 
-  // ---- 通过：重算来源信息（range 沿用它记录的旧范围）----
+  // ---- 通过：重算来源信息 ----
   const commitSha = await revParseHead(opts.repo);
   if (commitSha === null) throw new CommitRejected('仓库没有 HEAD 提交，无法记录来源版本');
-  // 来源文件已被删除 / 变成二进制时，这里会抛 CommitRejected（码 4），而不是裸 ENOENT（码 1）。
-  const srcText = await readSourceForCommit(opts.repo, active.path);
-
-  // 🔒 越界闸门（P0 回归）：range 全在文件外时 hashRange 会**静默截断**成空串哈希，
-  // 沿用旧的越界 range 就会写出"引用目标已消失、却自证与当前内容一致"的无效版本
-  // —— 下一次 read 会把它判成 ok（题面明确要求"绝不判为可用"）。宁拒不写。
-  const srcLineCount = countLines(srcText);
-  if (active.range[1] > srcLineCount) {
-    throw new CommitRejected(
-      `引用范围 ${active.range[0]}-${active.range[1]} 已不存在（来源现有 ${srcLineCount} 行），拒绝写入无法自洽的新版本；` +
-        '阶段 1–3 的 range 只能沿用旧范围，请先恢复来源文件，或把引用改到仍存在的范围',
-    );
-  }
 
   const version: GmdVersion = {
     rev: active.rev + 1,
     at: opts.at ?? nowIso(),
-    path: active.path,
-    range: [active.range[0], active.range[1]],
+    path: targetPath,
+    range: [targetRange[0], targetRange[1]],
     commit: commitSha,
-    src_hash: hashRange(srcText, active.range),
+    src_hash: hashRange(srcText, targetRange),
     text_hash: newHash,
   };
   if (dirty) version.note = 'based_on_dirty';
@@ -159,7 +205,8 @@ export async function commitBlock(opts: CommitOptions): Promise<CommitResult> {
     block: block.id,
     rev: version.rev,
     text_hash: newHash,
-    range: [active.range[0], active.range[1]],
+    range: [targetRange[0], targetRange[1]],
+    path: version.path,
     note: version.note,
     sourceDirty: dirty,
   };

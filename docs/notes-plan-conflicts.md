@@ -156,9 +156,31 @@ PLAN §4 明确写"以下函数签名只是建议（属契约自由度）"。实
 **第二轮明确未做**（如实登记，答辩须能正面回答）：
 
 - **`read --version <rev>` 取不回历史正文**（题面参考接口把 `--version` 列在 `read` 下，用途是"取正文与严重度"；本实现只存 `text_hash`，故只回"该版本的来源与摘要信息"）。见 README §5.3 的自觉取舍。
-- **`error`（来源文件被删 / 引用范围消失）没有"重写后写回"的出路**：阶段 1–3 的 `range` 只能沿用，需 `--path/--range` 重新绑定引用才好闭环。
+- ~~**`error`（来源文件被删 / 引用范围消失）没有"重写后写回"的出路**~~ ⇒ **本轮已做**：`commit --path / --range` 重新绑定引用（详见 §7）。
 - **`--allow-dirty` 版本的 `commit`（HEAD）与 `src_hash`（脏工作区）不同源**，审计上不自洽（`note=based_on_dirty` 已标注语义）。
 - **`commit` 会重渲染所有块的元数据头，未知扩展字段被静默丢弃**（前向兼容隐患）。
 - **`read --plain` 对 `error` 块仍输出块自身正文**（冲突视图只隐藏"来源当前内容"）。
 
 **修复后全量复跑**：`--test` **33/33 通过**（原 29 + 新增 4）；`scripts/setup-fixtures.ts` 幂等重建 OK。
+
+---
+
+## 7. 2026-10-11 第三轮：`commit --path / --range` 重新绑定引用（阶段 4·2）
+
+修掉 §6 里"`error` 档没有重写后写回的出路"这条 —— 它是 §6 表格第 1 项（P0 越界闸门）的**必然副作用**：既然越界/缺失的来源一律拒写，"必须重写"的 AI 就无路可走。补上那条路：
+
+| 改动 | 内容 |
+|---|---|
+| `src/commit.ts` | `CommitOptions` 新增 `path?` / `range?`；新增"目标来源"概念 `targetPath/targetRange`（缺省 = 活动版本的绑定）。**校验 3（dirty）与校验 5（越界）一律针对目标来源**；写出新版本时记新 `(path, range)`，`hist` 里旧版本绑定不动 |
+| `src/commit.ts` | 校验 3 **不再取 `judgeBlock(...).dirty`**，改用 `showText(HEAD, targetPath)` + `isRangeDirtyTexts` 直接算。顺带堵掉一个真实绕过口子：`judgeBlock` 在"正文与元数据不一致"（步骤 0）时会提前返回 `dirty=false`，于是**先把正文手改坏、再 commit** 就能在来源范围有未提交修改时照样写回 —— 违反题面"引用范围内有未提交修改时…不允许写回" |
+| `src/cli.ts` | `commit` 解析 `--path` / `--range`：取值非法 ⇒ **码 1**；`--json` 仅在 `--path` 重绑定时**追加** `path` 字段（与 `note` 同一先例，形状保持稳定）；人类可读输出带上新路径与"本次重新绑定"标注 |
+
+**边界与证据**（§8 新增用例）：
+
+- 用例 **28**：删来源 → `error` → `--path src/conf.ts --range 9..13` 重写并写回 ⇒ `rev 2`、`ok`；`log --block b1` 里 rev1 仍记 `src/kv.ts`/`[10,24]`（历史只追加）；`b2` 独立仍 error。
+- 用例 **29**：`--range 5..2` / `0..3` / `--path ../outside.ts` ⇒ 码 1；`--path src/nope.ts`、`--range 9..999`、**新来源脏** ⇒ 码 4；全程 `.gmd` 逐字节不变。
+- 用例 **30**：手改正文（块 `error`、`dirty=false`）+ 来源范围脏 ⇒ `commit` 必须**码 4**（旧实现会放行）。
+
+**修复后全量复跑**：`--test` **36/36 通过**（33 + 新增 3）。
+
+> 未做项里还剩 4 条（历史正文、`--allow-dirty` 的 commit/src_hash 同源、未知字段保真、`read --plain` 对 error 块的正文口径），见 §6。

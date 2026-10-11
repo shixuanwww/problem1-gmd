@@ -149,7 +149,7 @@ isRangeDirty(path,range) = hashRange(工作区,range) !== hashRange(HEAD 该文�
 gmd read   <doc> [--block <id>] [--version <rev>] [--plain|--body] [--json]
 gmd log    <doc> [--block <id>] [--path <src>] [--range <a..b>] [--json]
 gmd edit   <doc> --block <id> [--json]
-gmd commit <doc> --block <id> [--input <file|->] [--allow-dirty] [--json]
+gmd commit <doc> --block <id> [--input <file|->] [--allow-dirty] [--path <src>] [--range <a..b>] [--json]
 
 # 全局：--repo <path>（可放子命令前或后）；--json；--plain（read 专用）
 ```
@@ -171,13 +171,14 @@ gmd commit <doc> --block <id> [--input <file|->] [--allow-dirty] [--json]
 |---|---|
 | `read --json` | `{"doc": GmdDoc, "blocks": BlockJudgement[]}`（字段与 §3 判定结构一一对应；**给 `--block` 时 `blocks` 只含该块**，与冲突视图口径一致；退出码仍按整篇文档算） |
 | `log --json` | `--block` → `[{rev,at,path,range,commit,src_hash,text_hash}]`（版本带 `note` 时**追加**一个 `note` 字段，见下）；`--path`(+`--range`) → `[{sha,short,at,subject}]`；无参数 → `[{id,rev,severity,path,range}]` |
-| `commit --json` | `{"block","rev","text_hash","range"}` |
+| `commit --json` | `{"block","rev","text_hash","range"}`（`--path` 重新绑定时**追加** `path`，见 §4.2 注 3） |
 | `edit --json` | `{"draft_path"}`（绝对路径） |
 | 失败 | `{"error","code"}`（与退出码同号；人类可读文字一律走 stderr） |
 
-> 📎 **对 §4.9 契约的两处可选扩展**（都是**附加**的、不改既有字段语义，`JSON.parse` 与既有消费方不受影响）：
+> 📎 **对 §4.9 契约的三处可选扩展**（都是**附加**的、不改既有字段语义，`JSON.parse` 与既有消费方不受影响）：
 > 1. `read --json` 的 `BlockJudgement` 在 `changes` 被截断时附加 `changes_omitted`（§4.5 的截断注记）；
 > 2. `log --block --json` 的元素在**该版本有 `note` 时**附加 `note` —— 这是 `--allow-dirty` 写下的 `based_on_dirty`，是"此版本基于未提交来源"的**机器可读审计标记**；没有 `note` 的版本不会凭空多出该字段（形状保持稳定）。
+> 3. `commit --json` 在**本次用 `--path` 重新绑定**来源时附加 `path`（新来源路径）；不重绑时形状与原来完全一致。（只给 `--range` 时不会多字段 —— 新范围本来就在 `range` 里。）
 
 ### 4.3 `--plain`（别名 `--body`）—— 只出正文
 
@@ -187,13 +188,30 @@ gmd commit <doc> --block <id> [--input <file|->] [--allow-dirty] [--json]
 
 - **草稿** = `<!-- gmd:draft {"doc","block","base_rev","at"} -->` 头 + 当前正文；路径 `<repo>/.gmd/tmp/<doc 相对路径的分隔符→下划线>-<sha256(文档绝对路径)前8位>-<block>.draft.md`；目标已存在则**覆盖**并提示（不静默追加编号）。
 - **`commit` 步骤 0（先做）**：若输入首行以 `<!-- gmd:draft ` 开头 ⇒ **丢弃该行**并解析；`doc`/`block`/`base_rev` 任一与实参或当前状态不符 ⇒ 拒绝（码 4）；**新正文 = 输入去掉草稿头之后的内容**。⇒ **写入 `.gmd` 的正文永不含草稿头**。
-- **五道校验**（任一不过 ⇒ 拒绝，码 4）：① 正文非空 ② `base_rev == 当前 rev` ③ **dirty 闸门**（来源范围有未提交修改且未加 `--allow-dirty`）④ `textHash(新正文) ≠ 当前 text_hash`（否则"内容未变化"）⑤ **引用范围仍然存在**（`range[1] > countLines(来源)` ⇒ 拒写，否则越界 range 会被写成"自证一致"的假 `ok`）。
-- **通过后**：`commit = git rev-parse HEAD`、`src_hash` 重算、**`range` 沿用它记录的旧范围** → `hist.push(rev+1)` → 用新正文就地替换 → **原子写**（写 `.tmp` → `rename`）。
-- **来源在写回时已取不到**（文件被删 / 变成二进制）⇒ 同样**拒绝（码 4）**，理由写明"来源文件已不存在，无法记录新版本的来源信息"。⚠️ 这一条是必需的：题面 §2.4 把"文件没了"列为 `error`（**必须重写**），而阶段 1–3 的 `range` 只能沿用旧范围 ⇒ AI 重写得了正文、却**记不了新版本的来源**，只能被明确拒绝（而不是抛一句 `ENOENT` 让调用方无从分支）。**恢复来源文件后，同一条草稿即可正常写入。**
+- **五道校验**（任一不过 ⇒ 拒绝，码 4）：① 正文非空 ② `base_rev == 当前 rev` ③ **dirty 闸门**（**目标来源**范围有未提交修改且未加 `--allow-dirty`）④ `textHash(新正文) ≠ 当前 text_hash`（否则"内容未变化"）⑤ **引用范围仍然存在**（`targetRange[1] > countLines(目标来源)` ⇒ 拒写，否则越界 range 会被写成"自证一致"的假 `ok`）。**实际执行顺序是 ①②⑤③④** —— ⑤ 与 ③ 共用同一次来源读取，先判更基础的"范围是否真的存在"。
+- **目标来源 = 活动版本的 `(path, range)`**，可用 `--path` / `--range` **重新绑定**（见 §4.6）。**校验 3（dirty）与校验 5（越界）一律针对目标来源判** —— 重绑定之后，旧来源已经被这次写回放弃，闸门必须落在**新**来源上。
+- **通过后**：`commit = git rev-parse HEAD`、`src_hash = hashRange(目标来源文本, 目标 range)` → `hist.push(rev+1)` → 用新正文就地替换 → **原子写**（写 `.tmp` → `rename`）。
+- **来源在写回时已取不到**（文件被删 / 变成二进制）⇒ 同样**拒绝（码 4）**，理由写明"来源文件已不存在，无法记录新版本的来源信息"。⚠️ 这一条是必需的：题面 §2.4 把"文件没了"列为 `error`（**必须重写**），而 `range` 缺省只能沿用旧范围 ⇒ 光重写正文**记不了新版本的来源**，必须明确拒绝（而不是抛一句 `ENOENT` 让调用方无从分支）。**出路有三条**：① 恢复来源文件；② 用 `--path` / `--range` 把引用改指到仍存在的来源（§4.6）；③ `--allow-dirty`（仅当来源存在但有未提交修改）。
 
 ### 4.5 `--allow-dirty`（阶段 4·1，已实现）
 
 来源范围有未提交修改、但显式加 `--allow-dirty` 时：**允许写回**，并在**审计输出**（stderr）显著标注"此版本基于**未提交来源**"，新版本的 `note` 写入 **`based_on_dirty`**。不加该 flag 时严格拒绝（题面硬约束 5："不伪造正式版本"）。
+
+### 4.6 `commit --path / --range`：重新绑定引用（阶段 4）
+
+题面 §2.4 规定 `error` 档"**必须重写**"。但旧来源（文件被删、整段被替换）已经没有出路 —— 只重写正文的话，`--range` 沿用旧值仍会越界，写回必须拒绝。`--path` / `--range` 就是那条缺失的通路：**让 AI 把这块的引用改指到仍存在的来源**，于是 `error` 档也能走完"读 → 判断 → 重写 → 写回"闭环。
+
+```bash
+# 例：src/kv.ts 被删（该块 error）→ 重写正文，并把引用改指到 src/conf.ts 第 9–13 行
+gmd commit docs/api.gmd --block b1 --path src/conf.ts --range 9..13 --input new-body.md
+```
+
+规则：
+
+1. **只影响本版本**：新版本记新 `(path, range)`；`hist` 里**旧版本各自的 `path`/`range` 原样保留**（历史只追加，绝不改写）。
+2. **新来源照样过闸**：存在性、`range` 合法性（1-based 闭区间、`l0 ≤ l1`）、`range[1] ≤ 来源行数`、dirty 闸门 —— 任一不过即拒（参数层错误码 1、来源层错误码 4）。
+3. `--path` 必须是**仓库内**的相对路径（不得是绝对路径 / 盘符 / 含 `..`），否则码 1。
+4. 可以只给其中一个：只给 `--path` 表示"换文件、沿用旧行号"，只给 `--range` 表示"同文件、换范围"。
 
 ---
 
@@ -214,6 +232,7 @@ gmd commit <doc> --block <id> [--input <file|->] [--allow-dirty] [--json]
 - 三档判定（步骤 0 → 6 全实现）、行号漂移锚定、分段相似度、error 隐藏旧文字、**步骤 3.5 范围越界必判 `error`**（防 `hashRange` 静默截断伪造成 `ok`）
 - CLI：`read`（冲突视图 / `--plain` / `--json` / `--version`）、`log`（片段历史 / 来源提交历史 / `--range` 过滤与降级）、`edit`（草稿）、`commit`（草稿头剥离 + 五道校验 + 原子写 + 追加版本）
 - `--allow-dirty` 受控写回（阶段 4·1，`note=based_on_dirty` + 审计标注）
+- `commit --path / --range` **重新绑定引用**（阶段 4·2）：`error` 档"重写后把引用改指到仍存在的来源"⇒ 闭环打通；新来源照样过存在性 / 越界 / dirty 三道闸，历史版本各自的 `path`/`range` 不被改写
 - 退出码 0–5；`--json` 契约；`--repo` 定位；git 子进程 15s 超时 + `-C` 指定仓库
 
 **未实现**（如实声明，未做不算缺）
@@ -221,7 +240,7 @@ gmd commit <doc> --block <id> [--input <file|->] [--allow-dirty] [--json]
 - **不提供 `gmd new`**：题面参考接口只有 `read`/`log`/`edit`/`commit`。从零建文档请**手写骨架**（见 §7），`hist[0]` 的两个 hash 用 `hashRange` / `textHash` 实测。
 - **不做缓存**（题面"可生成"是可选；不做 = 每次真读仓库，天然满足"不用陈旧缓存"）。
 - **不做文件重命名跟踪**（重命名按"文件不存在"判 `error`，诚实且正确）。
-- **不做符号 / 选区级引用**（阶段 4 项；`commit` 沿用旧 `range`）。
+- **不做符号 / 选区级引用**（阶段 4 项；`commit` 缺省沿用旧 `range`，需改指时用 `--path` / `--range` 显式重绑定，见 §4.6）。
 - **不保存历史正文**（`hist_text[]` 未做，见 §5.3）。
 - **不做分支 / 祖先判断**（阶段 4 项；未判"来源来自其它分支"）。
 - **不做 MCP / Agent 集成**（阶段 4 项）。

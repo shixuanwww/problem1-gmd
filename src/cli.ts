@@ -74,7 +74,7 @@ const USAGE = `gmd —— Git 衍生文档管理器（.gmd）
   gmd read   <doc> [--block <id>] [--version <rev>] [--plain] [--json]
   gmd log    <doc> [--block <id>] [--path <src>] [--range <a..b>] [--json]
   gmd edit   <doc> --block <id> [--json]
-  gmd commit <doc> --block <id> [--input <file|->] [--allow-dirty] [--json]
+  gmd commit <doc> --block <id> [--input <file|->] [--allow-dirty] [--path <src>] [--range <a..b>] [--json]
 
 全局：
   --repo <path>   指定 Git 仓库（缺省从当前目录向上找 .git）
@@ -365,6 +365,28 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
     // ======================= commit =======================
     const blockFlag = parsed.flags.get('block');
     if (typeof blockFlag !== 'string') return fail(EXIT.USAGE, '用法：gmd commit <doc> --block <id> [--input <file|->]');
+
+    // 可选的"重新绑定引用"：把本版本的来源改指到仍存在的 path / range（阶段 4 通路）
+    const rebindPathFlag = parsed.flags.get('path');
+    let rebindPath: string | undefined;
+    if (typeof rebindPathFlag === 'string') {
+      const src = rebindPathFlag.split('\\').join('/');
+      if (!isRepoRelativePath(src)) {
+        return fail(
+          EXIT.USAGE,
+          `--path 必须是仓库内的相对路径（不得是绝对路径 / 盘符，且不得含 .. / . / 空段）: ${rebindPathFlag}`,
+        );
+      }
+      rebindPath = src;
+    }
+    const rebindRangeFlag = parsed.flags.get('range');
+    let rebindRange: [number, number] | undefined;
+    if (typeof rebindRangeFlag === 'string') {
+      const r = parseRange(rebindRangeFlag);
+      if (r === null) return fail(EXIT.USAGE, `--range 需要形如 a..b 且 1 <= a <= b: ${rebindRangeFlag}`);
+      rebindRange = [r.a, r.b];
+    }
+
     const inputFlag = parsed.flags.get('input');
     let inputText: string;
     if (inputFlag === undefined) {
@@ -387,15 +409,27 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
       blockId: blockFlag,
       inputText,
       allowDirty: parsed.flags.has('allow-dirty'),
+      path: rebindPath,
+      range: rebindRange,
     });
     if (result.sourceDirty) {
       io.err(`※ 审计提示：此版本基于**未提交来源**（新版本 note=based_on_dirty）—— 来源改动请尽快提交为正式版本。`);
     }
+    const rebound = rebindPath !== undefined || rebindRange !== undefined;
     if (wantJson) {
-      io.out(toJson({ block: result.block, rev: result.rev, text_hash: result.text_hash, range: result.range }));
+      const payload: Record<string, unknown> = {
+        block: result.block,
+        rev: result.rev,
+        text_hash: result.text_hash,
+        range: result.range,
+      };
+      // 可选扩展（与 `note` 同一先例）：仅在本次**重新绑定**了来源路径时附加新 path，形状保持稳定。
+      if (rebindPath !== undefined) payload.path = result.path;
+      io.out(toJson(payload));
     } else {
       io.out(
-        `已写入 ${docRel} 片段 ${result.block} → rev ${result.rev}（来源 ${result.range[0]}-${result.range[1]}，text_hash ${shortHash(result.text_hash)}）`,
+        `已写入 ${docRel} 片段 ${result.block} → rev ${result.rev}（来源 ${result.path}:${result.range[0]}-${result.range[1]}` +
+          `${rebound ? '（本次重新绑定）' : ''}，text_hash ${shortHash(result.text_hash)}）`,
       );
     }
     return EXIT.OK;
