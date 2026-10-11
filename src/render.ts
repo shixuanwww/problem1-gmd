@@ -142,7 +142,7 @@ export function toJson(value: unknown): string {
 }
 
 export function versionToJson(v: GmdVersion): Record<string, unknown> {
-  return {
+  const out: Record<string, unknown> = {
     rev: v.rev,
     at: v.at,
     path: v.path,
@@ -151,6 +151,12 @@ export function versionToJson(v: GmdVersion): Record<string, unknown> {
     src_hash: v.src_hash,
     text_hash: v.text_hash,
   };
+  // 可选扩展（与 `changes_omitted` 同一先例）：**仅在存在时**附加，不改变无 note 时的形状。
+  // 为什么必要：§4.6.2 要求 `--allow-dirty` 写回时把 `based_on_dirty` 记进版本的 `note`，
+  // 那是"此版本基于未提交来源"的**机器可读审计标记**；只在人类可读视图里显示，
+  // 用 `--json` 的 AI 就分辨不出这一版是不是脏来源产物。
+  if (typeof v.note === 'string') out.note = v.note;
+  return out;
 }
 
 /** 给 `read --json` 用的块序列化（保留 §3.3 全部字段）。 */

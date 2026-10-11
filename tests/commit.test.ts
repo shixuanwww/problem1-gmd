@@ -4,7 +4,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 
@@ -149,6 +149,48 @@ test('用例 20（阶段 4·1）：来源 dirty + commit --allow-dirty → 写�
   const log = await cli(['log', 'docs/api.gmd', '--block', 'b1', '--repo', repo]);
   assert.match(log.out, /note=based_on_dirty/);
   assert.match(log.out, /rev 2/);
+
+  const logJson = parseJson((await cli(['log', 'docs/api.gmd', '--block', 'b1', '--json', '--repo', repo])).out) as Array<
+    Record<string, unknown>
+  >;
+  assert.equal(logJson[1].note, 'based_on_dirty', '机器可读输出必须能分辨"基于未提交来源"的版本');
+  assert.equal('note' in logJson[0], false, '无 note 的版本不应凭空多出该字段（形状保持稳定）');
+});
+
+/**
+ * 回归（P0 修复）：来源文件被删除 ⇒ 该块判 `error`（题面 §2.4：必须重写），
+ * 但"重写"后**记不了新版本的来源**（阶段 1–3 的 range 只能沿用旧范围），
+ * 因此 `commit` 必须给出**退出码 4（写回被拒）+ 可解释理由**。
+ * 修复前这里是裸 `ENOENT` → CLI 兜底成码 1「参数/用法错误」，AI 无法据码分支。
+ */
+test('回归：来源被删除的 error 块，commit 必须以码 4 被拒（不是 ENOENT → 码 1）', async () => {
+  const { repo } = await freshRepo();
+  rmSync(srcPath(repo));
+  await commitAll(repo, 'case: 删除来源，制造 error', D);
+
+  // 前置：确实是 error，原因就是"引用文件不存在"
+  const before = blockOf(parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out), 'b1');
+  assert.equal(before.severity, 'error');
+  assert.match(before.reason, /引用文件不存在/);
+
+  // error 档允许 edit（题面：error 时必须重写）
+  const draft = await makeDraft(repo, 'b1');
+  replaceDraftBody(draft, NEW_BODY);
+  const raw = readText(docPath(repo));
+
+  const res = await cli(['commit', 'docs/api.gmd', '--block', 'b1', '--repo', repo, '--input', draft, '--json']);
+  assert.equal(res.code, 4, '必须是"写回被拒"（4），不能是参数错（1）或环境错（5）');
+  const payload = parseJson(res.out) as { error: string; code: number };
+  assert.equal(payload.code, 4, '--json 的失败对象必须与退出码同号');
+  assert.match(payload.error, /来源文件已不存在/);
+  assert.equal(readText(docPath(repo)), raw, '被拒时 .gmd 必须逐字节不变');
+
+  // 把来源恢复回去 ⇒ 同一条草稿应当顺利写入，证明刚才拒的确实只是"来源缺失"
+  writeText(srcPath(repo), KV_TS);
+  await commitAll(repo, 'case: 恢复来源', D2);
+  const again = await cli(['commit', 'docs/api.gmd', '--block', 'b1', '--repo', repo, '--input', draft, '--json']);
+  assert.equal(again.code, 0, again.err);
+  assert.equal((parseJson(again.out) as { rev: number }).rev, 2, '来源恢复后闭环应当走完');
 });
 
 test('写回是原子写：临时文件不残留，且 commit 只改目标片段', async () => {

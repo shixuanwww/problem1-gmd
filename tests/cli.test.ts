@@ -109,6 +109,31 @@ test('用例 19 补：日志的三种参数组合都能落地，read --version �
   assert.match(version.out, /历史正文不保存/);
 });
 
+test('回归：read --block <id> --json 必须只返回该块（与冲突视图口径一致）', async () => {
+  const { repo } = await freshRepo();
+
+  const json = await cli(['read', 'docs/api.gmd', '--block', 'b2', '--json', '--repo', repo]);
+  assert.equal(json.code, 0);
+  const payload = parseJson(json.out) as { blocks: Array<{ id: string }> };
+  assert.deepEqual(payload.blocks.map((b) => b.id), ['b2'], '--json 也必须按 --block 收窄');
+
+  const view = await cli(['read', 'docs/api.gmd', '--block', 'b2', '--repo', repo]);
+  assert.match(view.out, /\[ok\] b2/);
+  assert.doesNotMatch(view.out, /\[ok\] b1/, '两种输出形态的块集合必须一致');
+
+  // 不给 --block 时仍是全量
+  const all = parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out) as { blocks: unknown[] };
+  assert.equal(all.blocks.length, 3);
+
+  // 退出码仍按**整篇文档**算（§4.9）：即便只看 b1，只要文档里有 error 块就返回 3
+  rmSync(srcPath(repo, 'src/conf.ts'));
+  await commitAll(repo, 'case: 删除 conf.ts', D);
+  const narrowed = await cli(['read', 'docs/api.gmd', '--block', 'b1', '--json', '--repo', repo]);
+  assert.equal(narrowed.code, 3, '退出码不因 --block 收窄而放宽');
+  const narrowedPayload = parseJson(narrowed.out) as { blocks: Array<{ id: string }> };
+  assert.deepEqual(narrowedPayload.blocks.map((b) => b.id), ['b1']);
+});
+
 test('退出码：文档不存在 → 1；--repo 不是仓库 → 5', async () => {
   const { repo } = await freshRepo();
 

@@ -260,13 +260,17 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
       }
 
       const judgements = await judgeDoc(doc, repo);
+      // `--block` 必须对**两种输出形态**都生效：只过滤 JSON、不过滤冲突视图（或反之）会让
+      // AI（用 --json）与人类（看冲突视图）拿到不同的块集合，属于同一条命令自相矛盾。
+      const selected =
+        typeof blockFlag === 'string' ? judgements.filter((j) => j.id === blockFlag) : judgements;
       if (wantJson) {
-        io.out(toJson({ doc: doc.doc, blocks: judgements }));
+        io.out(toJson({ doc: doc.doc, blocks: selected }));
       } else {
-        const selected =
-          typeof blockFlag === 'string' ? judgements.filter((j) => j.id === blockFlag) : judgements;
         io.out(renderReadView(doc.doc, selected, { repo, docRel, docPath }));
       }
+      // 退出码仍按 §4.9：只要**文档里**存在 error 块就返回 3（与 PLAN §4.9 / §11 一致，
+      // 不因 --block 收窄而放宽 —— 脚本据此分支时不会漏判文档整体状态）。
       return judgements.some((j) => j.severity === 'error') ? EXIT.HAS_ERROR_BLOCK : EXIT.OK;
     }
 

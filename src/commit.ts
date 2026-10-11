@@ -11,7 +11,7 @@ import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 
 import { normalizeNewlines, parseGmd, serializeGmd } from './format.ts';
 import { draftPathFor, nowIso, stripDraftHeader } from './edit.ts';
-import { hashRange, readWorktreeText, revParseHead, textHash } from './gitrepo.ts';
+import { SourceEncodingError, hashRange, readWorktreeText, revParseHead, textHash } from './gitrepo.ts';
 import { judgeBlock } from './judge.ts';
 import type { GmdVersion } from './types.ts';
 
@@ -49,6 +49,33 @@ export function defaultDraftPath(repo: string, docRel: string, blockId: string):
 
 export function readInputFile(absPath: string): string {
   return readFileSync(absPath, 'utf8');
+}
+
+/**
+ * 读来源以重算 `src_hash`（阶段 1–3 的 `range` 只能沿用旧范围，所以来源必须还在）。
+ *
+ * ⚠️ 失败必须让 CLI 落在**退出码 4（写回被拒）**，**不能**冒泡成裸 `ENOENT`（会被 CLI 兜底成
+ * 码 1「参数/用法错误」—— 参数明明是好的）。题面 §2.4 把「文件没了」列为 `error`（= 必须重写），
+ * 所以这条链路必须给出**可解释、可分支**的拒绝理由，而不是一句 `open ... ENOENT`。
+ * 这条正是 §8 用例 4（删来源 → error）之后 `edit → 重写 → commit` 的收尾：AI 重写得了正文，
+ * 但**记不了新版本的来源**，只能被明确拒绝。
+ */
+async function readSourceForCommit(repo: string, relPath: string): Promise<string> {
+  try {
+    return await readWorktreeText(repo, relPath);
+  } catch (e) {
+    if (e instanceof SourceEncodingError) {
+      throw new CommitRejected(`来源不是 UTF-8 文本，无法记录新版本的来源摘要: ${relPath}`);
+    }
+    const code = (e as NodeJS.ErrnoException | null)?.code;
+    if (typeof code === 'string' && code.startsWith('ENOENT')) {
+      throw new CommitRejected(
+        `来源文件已不存在，无法记录新版本的来源信息: ${relPath}` +
+          '（阶段 1–3 不做符号/选区级引用，range 只能沿用旧范围；请先恢复来源文件，或改用其它引用）',
+      );
+    }
+    throw e;
+  }
 }
 
 export async function commitBlock(opts: CommitOptions): Promise<CommitResult> {
@@ -91,7 +118,8 @@ export async function commitBlock(opts: CommitOptions): Promise<CommitResult> {
   // ---- 通过：重算来源信息（range 沿用它记录的旧范围）----
   const commitSha = await revParseHead(opts.repo);
   if (commitSha === null) throw new CommitRejected('仓库没有 HEAD 提交，无法记录来源版本');
-  const srcText = await readWorktreeText(opts.repo, active.path);
+  // 来源文件已被删除 / 变成二进制时，这里会抛 CommitRejected（码 4），而不是裸 ENOENT（码 1）。
+  const srcText = await readSourceForCommit(opts.repo, active.path);
   const version: GmdVersion = {
     rev: active.rev + 1,
     at: opts.at ?? nowIso(),
