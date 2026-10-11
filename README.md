@@ -87,7 +87,8 @@ block     := "<!-- gmd:block " <JSON> "-->" 正文 "<!-- /gmd:block -->"
 本节不是衍生内容，不做判定。     ← 块外文本 = 完全自由的普通 Markdown
 ```
 
-> ⚠️ `docs/example.gmd` 是**格式示意**（hash 为示意值）。想看一个**可被真实判定**的文档，请先跑 `scripts/setup-fixtures.ts`，再 `gmd read docs/api.gmd --repo fixtures/repo`。
+> ⚠️ `docs/example.gmd` 是**格式示意**：它的 `src_hash` / `text_hash` 是**示意值**（与正文对不上），所以两个块会被判 `error`「正文与元数据不一致」—— 这是**刻意**的。但它**格式本身合法、必须能通过严格解析**：`gmd read docs/example.gmd` 应返回 **3**（存在 error 块），**不应**返回 **2**（格式损坏）。
+> 想看一个**可被真实判定为 `ok`** 的文档，请先跑 `scripts/setup-fixtures.ts`，再 `gmd read docs/api.gmd --repo fixtures/repo`。
 
 ### 2.4 单文件自包含 / 侧车文件说明（PLAN 附二 2）
 
@@ -165,11 +166,15 @@ gmd commit <doc> --block <id> [--input <file|->] [--allow-dirty] [--json]
 
 | 命令 | 形状 |
 |---|---|
-| `read --json` | `{"doc": GmdDoc, "blocks": BlockJudgement[]}`（字段与 §3 判定结构一一对应） |
-| `log --json` | `--block` → `[{rev,at,path,range,commit,src_hash,text_hash}]`；`--path`(+`--range`) → `[{sha,short,at,subject}]`；无参数 → `[{id,rev,severity,path,range}]` |
+| `read --json` | `{"doc": GmdDoc, "blocks": BlockJudgement[]}`（字段与 §3 判定结构一一对应；**给 `--block` 时 `blocks` 只含该块**，与冲突视图口径一致；退出码仍按整篇文档算） |
+| `log --json` | `--block` → `[{rev,at,path,range,commit,src_hash,text_hash}]`（版本带 `note` 时**追加**一个 `note` 字段，见下）；`--path`(+`--range`) → `[{sha,short,at,subject}]`；无参数 → `[{id,rev,severity,path,range}]` |
 | `commit --json` | `{"block","rev","text_hash","range"}` |
 | `edit --json` | `{"draft_path"}`（绝对路径） |
 | 失败 | `{"error","code"}`（与退出码同号；人类可读文字一律走 stderr） |
+
+> 📎 **对 §4.9 契约的两处可选扩展**（都是**附加**的、不改既有字段语义，`JSON.parse` 与既有消费方不受影响）：
+> 1. `read --json` 的 `BlockJudgement` 在 `changes` 被截断时附加 `changes_omitted`（§4.5 的截断注记）；
+> 2. `log --block --json` 的元素在**该版本有 `note` 时**附加 `note` —— 这是 `--allow-dirty` 写下的 `based_on_dirty`，是"此版本基于未提交来源"的**机器可读审计标记**；没有 `note` 的版本不会凭空多出该字段（形状保持稳定）。
 
 ### 4.3 `--plain`（别名 `--body`）—— 只出正文
 
@@ -181,6 +186,7 @@ gmd commit <doc> --block <id> [--input <file|->] [--allow-dirty] [--json]
 - **`commit` 步骤 0（先做）**：若输入首行以 `<!-- gmd:draft ` 开头 ⇒ **丢弃该行**并解析；`doc`/`block`/`base_rev` 任一与实参或当前状态不符 ⇒ 拒绝（码 4）；**新正文 = 输入去掉草稿头之后的内容**。⇒ **写入 `.gmd` 的正文永不含草稿头**。
 - **四道校验**（任一不过 ⇒ 拒绝，码 4）：① 正文非空 ② `base_rev == 当前 rev` ③ **dirty 闸门**（来源范围有未提交修改且未加 `--allow-dirty`）④ `textHash(新正文) ≠ 当前 text_hash`（否则"内容未变化"）。
 - **通过后**：`commit = git rev-parse HEAD`、`src_hash` 重算、**`range` 沿用它记录的旧范围** → `hist.push(rev+1)` → 用新正文就地替换 → **原子写**（写 `.tmp` → `rename`）。
+- **来源在写回时已取不到**（文件被删 / 变成二进制）⇒ 同样**拒绝（码 4）**，理由写明"来源文件已不存在，无法记录新版本的来源信息"。⚠️ 这一条是必需的：题面 §2.4 把"文件没了"列为 `error`（**必须重写**），而阶段 1–3 的 `range` 只能沿用旧范围 ⇒ AI 重写得了正文、却**记不了新版本的来源**，只能被明确拒绝（而不是抛一句 `ENOENT` 让调用方无从分支）。**恢复来源文件后，同一条草稿即可正常写入。**
 
 ### 4.5 `--allow-dirty`（阶段 4·1，已实现）
 
@@ -275,13 +281,13 @@ node --experimental-strip-types scripts/setup-fixtures.ts          # 先建仓�
 node --experimental-strip-types --test "tests/*.test.ts"           # 跑用例
 ```
 
-覆盖 PLAN §8 的用例 **0、1–20（含 19b/19c/19d、20）、23**，共 **27** 条断言全部通过。每条用例都从"模板仓库 `git clone` 一份"到独立临时目录，**互不污染**（这正是用例 0 反复强调的坑）。未做的可选用例 **21（MCP）/ 22（分支祖先）** 如实跳过。
+覆盖 PLAN §8 的用例 **0、1–20（含 19b/19c/19d、20）、23**，外加 **2 条回归用例**（来源被删除时的写回拒绝；`read --block --json` 的收窄），共 **29** 条断言全部通过。每条用例都从"模板仓库 `git clone` 一份"到独立临时目录，**互不污染**（这正是用例 0 反复强调的坑）。未做的可选用例 **21（MCP）/ 22（分支祖先）** 如实跳过。
 
 ---
 
 ## 10. Node / git 版本要求
 
-- **Node ≥ 22.6**（本实现实测于 **v22.22.2**），使用 `node --experimental-strip-types` 直接跑 TS。
+- **Node ≥ 22.6**（本实现实测于 **v22.22.2**；2026-10-11 的复核实测于 **v22.14.0**，两者均满足下限），使用 `node --experimental-strip-types` 直接跑 TS。
 - 该模式**只做类型擦除**，因此本仓库遵守：**相对 import 必须带 `.ts` 后缀**；**禁用** `enum` / `namespace` / 装饰器 / 构造函数参数属性 / `tsconfig` `paths` 别名。
 - **`git` 必须在 PATH 中**（唯一外部程序）。启动时探测一次 `git --version`，失败则**明确报错**（退出码 5），不静默降级。
 - **零第三方运行时依赖**（`package.json` 无 `dependencies`）。

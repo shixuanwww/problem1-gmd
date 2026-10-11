@@ -48,6 +48,22 @@
 **取舍（已实现）**：采用 `git log -L a,b:` 的口径 —— **尾随换行不额外算一行**（`src/gitrepo.ts` 的 `countLines`）。
 **理由**：若把尾随 `\n` 多算一行，`range[1] == 真实行数 + 1` 的输入会被误判为"未越界"从而去调 `-L`，触发 git `fatal`（退出码 128）→ 变成环境错误（码 5）而不是应有的"降级列出全部提交"。
 
+### 1.4 §3.2 的示例 `.gmd` 自身过不了 §4.1 的严格解析（**已修**）
+
+- **PLAN §3.2** 的示例（`b2` 块）里，`src_hash` / `text_hash` 是 **66 位** hex：
+  `sha256:00aa11bb…889900`（尾部多两位）。
+- **PLAN §3.3 / §4.1** 又要求 `src_hash` / `text_hash` 必须匹配 `^sha256:[0-9a-f]{64}$`。
+
+**冲突点**：把 §3.2 的示例原样存成 `.gmd`（`docs/example.gmd` 就是这么来的），`gmd read` 会直接抛
+`片段 hist[0].src_hash 必须是 "sha256:<64 位小写 hex>"` → **退出码 2（格式损坏）**。
+而 §3.2 的标题恰恰写着"示例文件（**可直接用作 fixture**）"，且 `docs/example.gmd` 是**唯一入库**的 `.gmd`
+（`fixtures/repo/` 整目录 `.gitignore`）—— 评审第一眼看到的就是它。
+
+**取舍（已实现）**：把 §3.2 与 `docs/example.gmd` 中 `b2` 的两个 hash **截掉多余的尾部两位**（只改长度，不改语义），
+使示例成为**合法的 `.gmd`**。修完后 `gmd read docs/example.gmd` 返回 **3**（两个块的正文 hash 是示意值 ⇒
+`error`「正文与元数据不一致」），而**不再**是 **2**（格式损坏）。
+**为什么不是改校验规则**：64 位是 §3.3 的**不可改契约**（`sha256:<64 位小写 hex>`），放宽反而破坏"格式损坏必须报错"。
+
 ---
 
 ## 2. 属"签名自由度"、不算冲突的偏差
@@ -58,6 +74,29 @@ PLAN §4 明确写"以下函数签名只是建议（属契约自由度）"。实
 |---|---|---|
 | `judgeDoc(doc, repo)` | `judgeDoc(parsed, repo, opts)` | 传入 `ParsedGmd` 以便同时拿到 `doc` 与 `blocks`；`opts.staged` 供"阶段 1 只实现步骤 0/1/3/4"时降级使用 |
 | `recordChanges(oldText, newText)` | `recordChanges(oldLines, newLines, startLine)` | 传行数组便于与 `hashRange`/`rangeLines` 共用同一套切分口径；`startLine` 用于填 `ChangePoint.line` |
+
+### 2.1 对 §4.9 `--json` 契约的**附加**字段（不改既有语义）
+
+两处都是**仅在条件成立时附加**，无该条件时形状与 §4.9 完全一致（既有消费方与 `JSON.parse` 不受影响）：
+
+| 字段 | 出现位置 | 条件 | 理由 |
+|---|---|---|---|
+| `changes_omitted` | `read --json` 的每个 `BlockJudgement` | `changes` 被 §4.5 的 20 条上限截断时 | 让 AI 知道"变更点被截断了"，而不是以为只有 20 处 |
+| `note` | `log --block --json` 的每个版本元素 | 该版本带 `note` 时 | §4.6.2 要求 `--allow-dirty` 把 `based_on_dirty` 写进 `note`；只在人类可读视图显示的话，**用 `--json` 的 AI 分辨不出版本是否基于未提交来源** ⇒ 审计标记必须机器可读 |
+
+> 权威的 JSON 形状说明同步写进了 README §4.2。
+
+---
+
+## 2.2 PLAN 未定义、由实现拍板的边界：**来源在写回时已取不到**
+
+- **PLAN 定义了的**：§4.6.2"通过后"要重算 `commit = git rev-parse HEAD` 与 `src_hash = hashRange(当前文件文本, range)`；§4.9 的退出码 4 = "写回被拒"，5 = "环境错误"。
+- **PLAN 没定义的**：`edit` 之后、`commit` 之前，**来源文件被删了**（或变成二进制）该怎么办。此时 `range` 只能沿用旧范围，"当前文件文本"根本不存在。
+
+**取舍（已实现）**：判为**写回被拒（码 4）**，理由写明"来源文件已不存在，无法记录新版本的来源信息"（`src/commit.ts` 的 `readSourceForCommit`）。
+**为什么不能不管**：修复前这里是把 `readFile` 的裸 `ENOENT` 直接冒泡，被 `cli.ts` 的兜底分支映射成**码 1「参数/用法错误」**—— 参数明明是好的，调用方据码分支会误判。而这条路径正是题面 §2.4 里"**文件没了 ⇒ error ⇒ 必须重写**"的收尾：AI 重写得了正文，却记不了新版本的来源，只能被明确拒绝。
+**为什么不是码 5**：码 5 是环境错误（git 不在、不是仓库、git 子进程非零/超时）。"来源没了"是**这次写回不成立**，属 §4.9 的码 4。
+**恢复路径**：把来源文件恢复回去，同一条草稿即可正常写入（回归用例覆盖）。
 
 ---
 
@@ -80,3 +119,21 @@ PLAN §4 明确写"以下函数签名只是建议（属契约自由度）"。实
 - 题面"默认冲突视图，可切换为只出正文" ⇒ 实现 `--plain`（别名 `--body`），一致（PLAN §1.6 / §4.9）。
 - 题面"命令名必须是 `gmd`" ⇒ `bin/gmd`、`bin/gmd.cmd` 与 `node --experimental-strip-types src/cli.ts` 均可用，一致。
 - 题面阶段 4 为**任选** ⇒ 仅实现 `--allow-dirty`（受控写回），其余如实声明"未实现"。
+
+---
+
+## 5. 2026-10-11 复核实测与修复记录
+
+对交付物做了一轮独立复核（重跑 fixture + 29 条用例 + 两个 demo + 手工探针），修掉 4 处：
+
+| # | 问题 | 修法 | 回归证据 |
+|---|---|---|---|
+| 1 | 来源被删除的 `error` 块，`commit` 冒泡裸 `ENOENT` → **码 1**（"参数错"），阶段 3 闭环在这条路径上断掉 | `src/commit.ts` 新增 `readSourceForCommit`：`ENOENT` / 非 UTF-8 ⇒ `CommitRejected`（**码 4** + 可解释理由） | `tests/commit.test.ts`「回归：来源被删除的 error 块，commit 必须以码 4 被拒」 |
+| 2 | `docs/example.gmd`（唯一入库的 `.gmd`）`b2` 两个 hash 是 **66 位** ⇒ `gmd read` 直接 **码 2 格式损坏** | 截到 64 位；`PLAN.md` §3.2 同步改正并加更正说明（见本文 §1.4） | `gmd read docs/example.gmd` → **3**（`error 正文与元数据不一致`），不再是 2 |
+| 3 | `bin/gmd` 在 git 里是 `100644`，POSIX 克隆后 `./bin/gmd` 不可执行（PLAN §7 要求 `chmod +x`） | `git update-index --chmod=+x bin/gmd` ⇒ `100755` | `git ls-files -s bin/gmd` |
+| 4 | `read --block <id> --json` 不过滤（返回全部块），与同一命令的冲突视图口径矛盾 | `src/cli.ts` 让 `--json` 与冲突视图共用同一个 `selected`；**退出码仍按整篇文档算** | `tests/cli.test.ts`「回归：read --block <id> --json 必须只返回该块」 |
+
+顺带补齐：`log --block --json` 的 `note`（见本文 §2.1）。
+
+**修复后全量复跑**：`--test` **29/29 通过**；`demo/stage1-2.ts` 与 `demo/warning-loop.ts` 均退出 0 且输出符合预期。
+
