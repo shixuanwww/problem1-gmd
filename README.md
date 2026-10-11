@@ -346,7 +346,27 @@ node --experimental-strip-types scripts/setup-fixtures.ts          # 先建仓�
 node --experimental-strip-types --test "tests/*.test.ts"           # 跑用例
 ```
 
-覆盖 PLAN §8 的用例 **0、1–20（含 19b/19c/19d、20）、23**，外加 **2 条回归用例**（来源被删除时的写回拒绝；`read --block --json` 的收窄），共 **29** 条断言全部通过。每条用例都从"模板仓库 `git clone` 一份"到独立临时目录，**互不污染**（这正是用例 0 反复强调的坑）。未做的可选用例 **21（MCP）/ 22（分支祖先）** 如实跳过。
+覆盖 PLAN §8 的用例 **0、1–20（含 19b/19c/19d、20）、23**，外加历轮复核补入的回归用例（来源被删除时的写回拒绝、`read --block --json` 的收窄、判定缓存双向断言、有界预览等）。实跑 `node --test` 输出 **`# tests 45 / # pass 45 / # fail 0`**（约 14s），**45 个用例全部通过**。每条用例都从"模板仓库 `git clone` 一份"到独立临时目录，**互不污染**（这正是用例 0 反复强调的坑）。未做的可选用例 **21（MCP）/ 22（分支祖先）** 如实跳过。
+
+### 对抗性探针（`probes/`，可现场复现）
+
+除用例测试外，还有 **7 个端到端对抗探针**：在临时仓库里跑**真实 CLI**，专挑边界与对抗场景 —— 路径逃逸（`v.path: "../../secret.txt"`）、范围越界**伪造成 `ok`**、引用范围被整段删除后重写、CLI 选项归属与退出码一致性、前向兼容（未知字段保真）、超长单行、非 ASCII 路径、`git worktree`、重命名历史，以及 **1500 例解析器模糊测试**。
+
+| 探针 | 覆盖 | 结果 |
+|---|---|---|
+| `gmd-probe.mjs` | 端到端 21 项（三档判定 / 写回闭环 / dirty 闸门 / `--allow-dirty`） | **21 passed** |
+| `gmd-probe2.mjs` | 路径逃逸、前向兼容、error 闭环、`--plain` 语义 | **8 passed** |
+| `gmd-probe3.mjs` | 范围整段删除后重写**不得伪造 `ok`** | **5 passed** |
+| `gmd-probe4.mjs` | CLI 表面（选项归属、同码、可诊断性） | **9 passed** |
+| `gmd-probe5.mjs` | 判定路径性能（16 块同源 / 漂移窗口） | **5 passed** |
+| `gmd-probe6.mjs` | 边界环境（超长行 / 非 ASCII / worktree / 重命名） | **10 passed** |
+| `gmd-probe7.mjs` | 解析器模糊测试 1500 例 | **崩溃 0 / 往返不一致 0 / 非幂等 0** |
+
+```bash
+node --experimental-strip-types probes/gmd-probe.mjs      # 其余依次 probe2 … probe7
+```
+
+> **合计 58 项断言全部 PASS**（probe6 的符号链接两项在无权限环境自动跳过）。探针脚本**自定位项目根**（`import.meta.url`），换机器可直接运行；`probes/` 外的原始留档不影响交付。
 
 ---
 
@@ -360,7 +380,7 @@ node --experimental-strip-types --test "tests/*.test.ts"           # 跑用例
 
 ### 环境注记（本机实测）
 
-- 本机 `child_process.spawnSync` 会 `EBUSY` 失败，故 git 调用**一律走异步 `spawn`**（带 15s 超时）。异步通道没有该限制，也不影响"带超时 + `-C <repo>`"两条硬要求。
+- git 调用**一律走异步 `spawn`**（带 15s 超时 + `-C <repo>`）：不阻塞事件循环，且天然支持超时。同步 `spawnSync` 在受限环境（沙箱 / 高负载）下**曾观察到** `EBUSY` 失败，异步通道无此问题 —— 但 `spawnSync` 在本机**正常负载下工作正常**（2026-10-11 复测：`git --version` 连测多次均成功），故此处选异步是**工程偏好**（不阻塞 + 便于超时），不是本机限制。
 - 若在注入了 `safe-delete` 护栏的环境里跑 `scripts/setup-fixtures.ts`（其 `rm -rf` 重建会触发"单轮批量删除"确认），临时禁用该护栏即可；**普通机器无需任何额外设置**。
 
 ---
@@ -392,7 +412,8 @@ problem1-gmd/
 │   └── cli.ts                    ← 参数解析 + 分发 + 退出码
 ├── scripts/setup-fixtures.ts     ← 幂等重建 fixtures/repo（可复现 commit）
 ├── demo/stage1-2.ts · warning-loop.ts
-├── tests/*.test.ts               ← PLAN §8 断言
+├── tests/*.test.ts               ← PLAN §8 断言（45 用例）
+├── probes/gmd-probe*.mjs         ← 对抗性探针（7 个，可现场复现，共 58 项）
 ├── docs/
 │   ├── problem-statement.md      ← 题面逐字原文
 │   ├── example.gmd               ← 格式示意（§3.2）
