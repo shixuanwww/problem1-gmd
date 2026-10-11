@@ -168,6 +168,10 @@ export async function buildFixtureRepo(targetDir: string): Promise<FixtureInfo> 
   mkdirSync(path.join(targetDir, 'docs'), { recursive: true });
 
   await gitOk(null, ['init', '-q', '-b', 'main', targetDir]);
+  // 评审机可能没配 git 全局身份（commit 会报 Author identity unknown）——
+  // 给 fixture 仓库配仓库级身份，不影响机器全局配置。
+  await gitOk(null, ['-C', targetDir, 'config', 'user.name', 'shixuan']);
+  await gitOk(null, ['-C', targetDir, 'config', 'user.email', 'shixuan@localhost']);
 
   writeFileSync(path.join(targetDir, 'src/kv.ts'), KV_TS, 'utf8');
   writeFileSync(path.join(targetDir, 'src/conf.ts'), CONF_TS, 'utf8');
