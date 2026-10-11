@@ -84,6 +84,15 @@ export interface ParsedGmd {
   doc: GmdDoc;
   blocks: GmdBlock[]; // 按文件内出现顺序
   raw: string; // 原文，写回时保持块外内容不变
+  /**
+   * 位于**围栏代码块**内、因此被按字面量忽略、且**不属于任何片段**的 gmd 标记。
+   *
+   * 为什么要暴露：围栏里的标记一律不当真（见 format.ts 的 scanFenceSpans），于是"用围栏把真片段
+   * 包起来"的文档会**静默变成 0 片段**、`read` 还返回成功 —— 对判定工具来说这太安静了。
+   * 这里如实报出来，由调用方提示用户（不报错：同一个形态也可能就是"展示格式示例"）。
+   * 落在某个片段正文**内部**的（= 合法的格式示例）不计入。
+   */
+  ignoredInFence: Array<{ line: number; kind: 'doc' | 'block-open' | 'block-close' }>;
 }
 
 // ---------- 判定（PLAN §4.3）----------

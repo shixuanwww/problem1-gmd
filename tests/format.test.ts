@@ -177,3 +177,59 @@ test('用例 32：hist[].text 与 text_hash 不一致 → 码 2；旧格式（�
   assert.match(plainAll.out, /批量写入，顺序执行，任一失败即中断。/);
   assert.match(plainAll.err, /未存正文[\s\S]*b1 rev 1/, '必须点名是哪一版的正文缺失');
 });
+
+/**
+ * 用例 37（可诊断性）：围栏代码块**包住真标记** ⇒ 不报错，但必须**报出来**（否则静默变 0 片段）。
+ *
+ * 围栏里的标记一律按字面量忽略（=.gmd 可以讲自己的格式），代价是"用围栏把真片段包起来"的文档
+ * 会**静默变成 0 片段**、`read` 还返回成功 —— 对判定工具来说太安静了。这里把"被忽略的标记"
+ * 如实报给调用方（stderr + `--json` 的 `fence_ignored`），但**不报错**：同形态也可能就是
+ * 故意展示格式示例。落在某个片段正文**内部**的示例（合法用法）不计入。
+ */
+test('用例 37：围栏包住真标记 → 不报错但要点名；片段正文内的格式示例不点名', async () => {
+  const { repo } = await freshRepo();
+  writeText(
+    docPath(repo),
+    [
+      '<!-- gmd:doc {"gmd":1,"doc_id":"d","created_at":"t"} -->',
+      '',
+      '```',
+      '<!-- gmd:block {"id":"b1","hist":[]} -->',
+      '正文',
+      '<!-- /gmd:block -->',
+      '```',
+      '',
+    ].join('\n'),
+  );
+
+  const res = await cli(['read', 'docs/api.gmd', '--repo', repo]);
+  assert.equal(res.code, 0, '不报错：同形态也可能是故意展示格式示例');
+  assert.match(res.err, /围栏代码块/);
+  assert.match(res.err, /不属于任何片段/);
+  assert.match(res.err, /第 4 行 block-open/, '必须点到具体行号与标记种类');
+  assert.match(res.err, /第 6 行 block-close/);
+
+  const json = parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out) as {
+    blocks: unknown[];
+    fence_ignored?: Array<{ line: number; kind: string }>;
+  };
+  assert.equal(json.blocks.length, 0, '标记被忽略 ⇒ 0 片段（这正是需要点名的原因）');
+  assert.deepEqual(json.fence_ignored, [
+    { line: 4, kind: 'block-open' },
+    { line: 6, kind: 'block-close' },
+  ]);
+
+  // 对照：把**片段正文**写成含围栏示例的正文（合法用法）⇒ 不得报 fence_ignored
+  const { repo: repo2 } = await freshRepo();
+  const body = ['示例：', '', '```', '<!-- gmd:block {"id":"x"} -->', '```'].join('\n');
+  const committed = await cli(['commit', 'docs/api.gmd', '--block', 'b2', '--repo', repo2, '--input', '-', '--json'], {
+    stdin: body,
+  });
+  assert.equal(committed.code, 0, committed.err);
+  const inside = parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo2])).out) as {
+    blocks: Array<{ id: string; severity: string }>;
+    fence_ignored?: unknown;
+  };
+  assert.equal(inside.fence_ignored, undefined, '片段正文里的格式示例是合法用法，不该点名');
+  assert.equal(inside.blocks.length, 3, '片段数不受影响');
+});

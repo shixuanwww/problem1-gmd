@@ -9,11 +9,11 @@
  * 失败时**不污染 stdout**：`--json` 给 `{"error","code"}`，人类可读文字一律走 stderr。
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { CommitRejected, commitBlock, readInputFile } from './commit.ts';
+import { BlockNotFoundError, CommitRejected, commitBlock, readInputFile } from './commit.ts';
 import { draftPathFor, writeDraft } from './edit.ts';
 import { parseGmd } from './format.ts';
 import {
@@ -68,6 +68,15 @@ export interface CliOptions {
 
 const BOOL_FLAGS = new Set(['json', 'plain', 'body', 'allow-dirty', 'help', 'h']);
 const VALUE_FLAGS = new Set(['repo', 'block', 'version', 'input', 'path', 'range']);
+
+/** 全局选项（任何子命令都可用）+ 每个子命令**自己**的选项。 */
+const GLOBAL_FLAGS = ['repo', 'json', 'help', 'h'] as const;
+const COMMAND_FLAGS: Record<string, readonly string[]> = {
+  read: ['block', 'version', 'plain', 'body'],
+  log: ['block', 'path', 'range'],
+  edit: ['block'],
+  commit: ['block', 'input', 'allow-dirty', 'path', 'range'],
+};
 
 const USAGE = `gmd —— Git 衍生文档管理器（.gmd）
 
@@ -189,6 +198,13 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
   if (cmd !== 'read' && cmd !== 'log' && cmd !== 'edit' && cmd !== 'commit') {
     return fail(EXIT.USAGE, `未知子命令: ${cmd}`);
   }
+  // 选项归属：**不属于本子命令的选项一律报错**，绝不静默忽略 —— 对 AI 来说"传了却不生效"
+  // 比报错危险得多（例如以为 `read --range 1..2` 会收窄输出，实际拿到整篇并按整篇判定）。
+  for (const name of parsed.flags.keys()) {
+    if ((GLOBAL_FLAGS as readonly string[]).includes(name)) continue;
+    if (COMMAND_FLAGS[cmd].includes(name)) continue;
+    return fail(EXIT.USAGE, `gmd ${cmd} 不支持选项 --${name}（见 gmd --help）`);
+  }
 
   try {
     // ---- 环境自检：git 必须在 PATH 中（PLAN §2.1，失败必须明确报错而非静默降级）----
@@ -221,7 +237,23 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
       return fail(EXIT.USAGE, `找不到文档: ${docRel}`);
     }
 
-    const loadDoc = async (): Promise<ParsedGmd> => parseGmd(await readWorktreeText(repo, docRel));
+    /**
+     * 围栏代码块里、且**不属于任何片段**的 gmd 标记（见 format.ts 的 scanFenceSpans）。
+     * 围栏里的标记一律按字面量处理 ⇒ "用围栏把真片段包起来"的文档会**静默变成 0 片段**、
+     * `read` 还返回成功。不报错（同形态也可能是故意展示格式示例），但必须在 stderr 让人看见。
+     */
+    const noteIgnoredInFence = (parsed: ParsedGmd): void => {
+      if (parsed.ignoredInFence.length === 0) return;
+      const where = parsed.ignoredInFence.map((m) => `第 ${m.line} 行 ${m.kind}`).join('、');
+      io.err(`※ 有 ${parsed.ignoredInFence.length} 个 gmd 标记位于**围栏代码块**内、不属于任何片段，已按字面量忽略：${where}`);
+      io.err('  若那不是格式示例，请把这些标记移出围栏 —— 它们不会参与判定，片段数可能因此为 0。');
+    };
+
+    const loadDoc = async (): Promise<ParsedGmd> => {
+      const parsed = parseGmd(await readWorktreeText(repo, docRel));
+      noteIgnoredInFence(parsed);
+      return parsed;
+    };
 
     // ======================= read =======================
     if (cmd === 'read') {
@@ -311,7 +343,15 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
       const selected =
         typeof blockFlag === 'string' ? judgements.filter((j) => j.id === blockFlag) : judgements;
       if (wantJson) {
-        io.out(toJson({ doc: doc.doc, blocks: selected }));
+        io.out(
+          toJson({
+            doc: doc.doc,
+            blocks: selected,
+            // 可选扩展（与 changes_omitted / note 同一先例）：**仅在真的发生围栏忽略时**出现，
+            // 让用 --json 的 AI 也能知道"片段数为什么是 0 / 为什么少了几块"。
+            ...(doc.ignoredInFence.length > 0 ? { fence_ignored: doc.ignoredInFence } : {}),
+          }),
+        );
       } else {
         io.out(renderReadView(doc.doc, selected, { repo, docRel, docPath }));
       }
@@ -433,12 +473,15 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
       if (!existsSync(draft)) {
         return fail(EXIT.USAGE, `未找到草稿文件: ${draft}（请先 gmd edit，或用 --input <file|-> 指定）`);
       }
+      if (!statSync(draft).isFile()) return fail(EXIT.USAGE, `草稿路径不是普通文件: ${draft}`);
       inputText = readInputFile(draft);
     } else if (inputFlag === '-') {
       inputText = options.stdin ?? (await readAllStdin());
     } else {
       const abs = path.resolve(cwd, inputFlag);
       if (!existsSync(abs)) return fail(EXIT.USAGE, `找不到 --input 文件: ${abs}`);
+      // 目录/设备等非普通文件 ⇒ 参数错（否则 readFileSync 抛 EISDIR，被兜底成"环境错误"码 5）
+      if (!statSync(abs).isFile()) return fail(EXIT.USAGE, `--input 必须是普通文件（不是目录）: ${abs}`);
       inputText = readInputFile(abs);
     }
 
@@ -474,6 +517,8 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
     return EXIT.OK;
   } catch (e) {
     if (e instanceof GmdFormatError) return fail(EXIT.FORMAT, `${e.message}（第 ${e.line} 行）`);
+    // 片段不存在属**参数错**（与 read / log / edit 同码），不能混进"写回被拒"
+    if (e instanceof BlockNotFoundError) return fail(EXIT.USAGE, e.message);
     if (e instanceof CommitRejected) return fail(EXIT.REJECTED, e.message);
     // 元数据里的来源路径逃出仓库 ⇒ 视同格式非法（第一道闸在 parseGmd，这是兜底）
     if (e instanceof RepoPathError) return fail(EXIT.FORMAT, `来源路径非法：${e.message}`);

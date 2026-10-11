@@ -134,25 +134,33 @@ function firstNonEmptyLine(text: string): number {
   return 1;
 }
 
-function scanMarkers(text: string): Marker[] {
+interface MarkerScan {
+  markers: Marker[];
+  /** 落在**围栏代码块**内、被按字面量忽略的标记（见 scanFenceSpans）。 */
+  ignored: Marker[];
+}
+
+function scanMarkers(text: string): MarkerScan {
   const fences = scanFenceSpans(text);
-  const out: Marker[] = [];
+  const markers: Marker[] = [];
+  const ignored: Marker[] = [];
   MARKER_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = MARKER_RE.exec(text)) !== null) {
-    // 围栏代码块里的字面量不是标记（见 scanFenceSpans 的说明）。
-    if (insideSpans(fences, m.index)) continue;
     const isClose = m[1] === '/';
     const name = m[2];
-    out.push({
+    const marker: Marker = {
       kind: name === 'doc' ? 'doc' : isClose ? 'block-close' : 'block-open',
       json: m[3].trim(),
       start: m.index,
       end: m.index + m[0].length,
       line: lineOf(text, m.index),
-    });
+    };
+    // 围栏代码块里的字面量不是标记（见 scanFenceSpans 的说明），但要记下来备查：
+    // 若它落在**任何片段之外**，说明作者可能是想写真片段而误加了围栏 —— 那不报错也得让人看见。
+    (insideSpans(fences, m.index) ? ignored : markers).push(marker);
   }
-  return out;
+  return { markers, ignored };
 }
 
 function parseJsonObject(json: string, what: string, line: number): Record<string, unknown> {
@@ -256,7 +264,7 @@ function validateVersion(raw: unknown, index: number, line: number): GmdVersion 
 /** 严格解析：任何异常都抛 GmdFormatError（带行号），绝不跳过一个坏块继续。 */
 export function parseGmd(raw: string): ParsedGmd {
   const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
-  const markers = scanMarkers(text);
+  const { markers, ignored } = scanMarkers(text);
 
   if (markers.length === 0 || markers[0].kind !== 'doc') {
     throw new GmdFormatError('文件内第一个非空内容必须是 gmd:doc 块', firstNonEmptyLine(text));
@@ -278,6 +286,7 @@ export function parseGmd(raw: string): ParsedGmd {
   const doc: GmdDoc = { gmd: 1, doc_id: docRaw.doc_id, created_at: docRaw.created_at };
 
   const blocks: GmdBlock[] = [];
+  const blockSpans: Span[] = [];
   const seenIds = new Set<string>();
   let open: Marker | null = null;
 
@@ -318,6 +327,7 @@ export function parseGmd(raw: string): ParsedGmd {
     const blockExtras = collectExtras(head, KNOWN_BLOCK_KEYS);
     if (blockExtras !== null) block[EXTRAS] = blockExtras;
     blocks.push(block);
+    blockSpans.push({ start: open.start, end: mk.end });
     open = null;
   }
 
@@ -325,7 +335,13 @@ export function parseGmd(raw: string): ParsedGmd {
     throw new GmdFormatError('gmd:block 未闭合（缺少 <!-- /gmd:block -->）', open.line);
   }
 
-  return { doc, blocks, raw };
+  // 围栏内、且**不在任何片段里**的标记：可能是"作者想写真片段却误加了围栏"。不报错（同形态
+  // 也可能是故意展示格式示例），但要如实交给调用方提示 —— 否则文档会静默变成 0 片段。
+  const ignoredInFence = ignored
+    .filter((mk) => !blockSpans.some((s) => mk.start >= s.start && mk.start < s.end))
+    .map((mk) => ({ line: mk.line, kind: mk.kind }));
+
+  return { doc, blocks, raw, ignoredInFence };
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +400,7 @@ interface Span {
 }
 
 function scanBlockSpans(text: string): Span[] {
-  const markers = scanMarkers(text);
+  const { markers } = scanMarkers(text);
   const spans: Span[] = [];
   let open: Marker | null = null;
   for (const mk of markers) {

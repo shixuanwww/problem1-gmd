@@ -117,6 +117,77 @@ test('用例 34：read --plain 必须在 stderr 点明失效片段（stdout 仍�
   assert.match(narrowed.err, /另有 2 个片段已失效[\s\S]*b1/);
 });
 
+/**
+ * 用例 35：**选项归属** —— 不属于该子命令的选项必须报错（码 1），绝不静默忽略。
+ *
+ * 修复前 `parseArgs` 只校验"选项名是否存在于全局表"，于是 `read --range 1..2` 会被接受并
+ * **悄悄丢掉** —— AI 以为读到的只是那两行 / 只按那个范围判定，实际拿到的是整篇。
+ * 对"给 AI 用的 CLI"来说，"传了却不生效"比报错危险得多。
+ */
+test('用例 35：不属于该子命令的选项 → 参数错（码 1），不得静默忽略', async () => {
+  const { repo } = await freshRepo();
+  const bad: string[][] = [
+    ['read', 'docs/api.gmd', '--range', '1..2'],
+    ['read', 'docs/api.gmd', '--path', 'src/kv.ts'],
+    ['log', 'docs/api.gmd', '--plain'],
+    ['log', 'docs/api.gmd', '--version', '1'],
+    ['edit', 'docs/api.gmd', '--block', 'b1', '--allow-dirty'],
+    ['commit', 'docs/api.gmd', '--block', 'b1', '--version', '1'],
+  ];
+  for (const argv of bad) {
+    const res = await cli([...argv, '--repo', repo]);
+    assert.equal(res.code, 1, `${argv.join(' ')} 应当是参数错，实际 ${res.code}`);
+    assert.match(res.err, /不支持选项/, `${argv.join(' ')} 必须说清是选项不属于该子命令`);
+  }
+
+  // 各子命令自己的选项与全局选项照常工作（别把合法用法一起拦了）
+  assert.equal((await cli(['read', 'docs/api.gmd', '--block', 'b1', '--plain', '--repo', repo])).code, 0);
+  assert.equal((await cli(['read', 'docs/api.gmd', '--body', '--repo', repo])).code, 0, '--body 是 --plain 的别名');
+  assert.equal((await cli(['log', 'docs/api.gmd', '--path', 'src/kv.ts', '--range', '1..3', '--repo', repo])).code, 0);
+  assert.equal(
+    (await cli(['edit', 'docs/api.gmd', '--block', 'b1', '--repo', repo])).code,
+    0,
+    'edit 只接受 --block（外加全局选项）',
+  );
+  assert.equal(
+    (await cli(['commit', 'docs/api.gmd', '--block', 'b1', '--allow-dirty', '--input', '-', '--repo', repo], { stdin: '新正文\n' }))
+      .code,
+    0,
+  );
+});
+
+/**
+ * 用例 36：**退出码一致性** —— "片段不存在"在四个子命令下都必须码 1；`--input` 指向目录也是码 1。
+ *
+ * 修复前 `commit --block nope` 回**码 4（写回被拒）**，而 read/log/edit 回码 1：按退出码分支的
+ * 调用方会把"参数打错了"当成"来源脏 / 内容没变"去处理。`--input <目录>` 则冒泡 EISDIR 被兜底成
+ * **码 5（环境错误）**，同样指错了方向。
+ */
+test('用例 36：片段不存在四命令同码（1）；--input 指向目录也是码 1', async () => {
+  const { repo } = await freshRepo();
+  const cases: string[][] = [
+    ['read', 'docs/api.gmd', '--block', 'nope'],
+    ['log', 'docs/api.gmd', '--block', 'nope'],
+    ['edit', 'docs/api.gmd', '--block', 'nope'],
+    ['commit', 'docs/api.gmd', '--block', 'nope', '--input', '-'],
+  ];
+  for (const argv of cases) {
+    const res = await cli([...argv, '--repo', repo], { stdin: '新正文\n' });
+    assert.equal(res.code, 1, `${argv[0]} 的"片段不存在"应当是参数错，实际 ${res.code}`);
+    assert.match(res.err, /找不到片段/);
+  }
+
+  const dirArg = mkdtempSync(path.join(tmpdir(), 'gmd-input-dir-'));
+  try {
+    const res = await cli(['commit', 'docs/api.gmd', '--block', 'b1', '--input', dirArg, '--repo', repo]);
+    assert.equal(res.code, 1, `--input 指向目录必须是参数错，实际 ${res.code}`);
+    assert.match(res.err, /普通文件/);
+    assert.doesNotMatch(res.err, /内部错误/, '不能落进兜底的"内部错误"');
+  } finally {
+    rmSync(dirArg, { recursive: true, force: true });
+  }
+});
+
 test('用例 19 补：日志的三种参数组合都能落地，read --version 给出该版本来源信息与历史正文', async () => {
   const { repo } = await freshRepo();
 

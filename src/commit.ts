@@ -34,6 +34,18 @@ export class CommitRejected extends Error {
   }
 }
 
+/**
+ * `--block` 指向不存在的片段 —— 这是**参数错（退出码 1）**，不是"写回被拒（4）"。
+ * 为什么单独分出来：`read` / `log` / `edit` 遇到同一个输入都回码 1，`commit` 若回 4，
+ * 按退出码分支的调用方会把"参数打错了"当成"来源脏/内容没变"去处理。
+ */
+export class BlockNotFoundError extends Error {
+  constructor(blockId: string) {
+    super(`找不到片段: ${blockId}`);
+    this.name = 'BlockNotFoundError';
+  }
+}
+
 export interface CommitOptions {
   repo: string;
   docRel: string;
@@ -100,7 +112,7 @@ export async function commitBlock(opts: CommitOptions): Promise<CommitResult> {
   const parsed = parseGmd(raw);
 
   const idx = parsed.blocks.findIndex((b) => b.id === opts.blockId);
-  if (idx < 0) throw new CommitRejected(`找不到片段: ${opts.blockId}`);
+  if (idx < 0) throw new BlockNotFoundError(opts.blockId);
   const block = parsed.blocks[idx];
   const active = block.hist[block.hist.length - 1];
 
