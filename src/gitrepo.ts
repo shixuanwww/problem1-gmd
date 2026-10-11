@@ -169,10 +169,18 @@ export function normalizeEol(text: string): string {
   return text.split(/\r\n|\r|\n/).join('\n');
 }
 
-/** 🔒 src_hash 的唯一实现：先归一化换行，再取 [l0,l1]（1-based 闭区间）行，join('\n') 后 sha256。 */
-export function hashRange(text: string, [l0, l1]: [number, number]): string {
-  const lines = normalizeEol(text).split('\n').slice(l0 - 1, l1);
-  return 'sha256:' + createHash('sha256').update(lines.join('\n'), 'utf8').digest('hex');
+/**
+ * 🔒 src_hash 的**唯一算法**：取 [l0,l1]（1-based 闭区间）行、join('\n') 后 sha256。
+ * 参数是**已按 `\n` 切好行**的数组 —— 让"已切开行的调用方"（判定步骤 5 的滑窗）不必每轮
+ * 都对整个文件重新 `normalizeEol + split`（那会把 O(文件行数) 的切分开销乘进滑窗次数里）。
+ */
+export function hashRangeLines(lines: string[], [l0, l1]: [number, number]): string {
+  return 'sha256:' + createHash('sha256').update(lines.slice(l0 - 1, l1).join('\n'), 'utf8').digest('hex');
+}
+
+/** 🔒 src_hash 的唯一实现：先归一化换行，再切行，再交给 `hashRangeLines`（同一份算法）。 */
+export function hashRange(text: string, range: [number, number]): string {
+  return hashRangeLines(normalizeEol(text).split('\n'), range);
 }
 
 /** 🔒 text_hash 的唯一实现：先归一化换行，再 trim，再 sha256。 */

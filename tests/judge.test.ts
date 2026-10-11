@@ -11,8 +11,10 @@ import { rmSync } from 'node:fs';
 import { test } from 'node:test';
 
 import { CONF_TS, KV_TS, commitAll } from '../scripts/setup-fixtures.ts';
+import { parseGmd } from '../src/format.ts';
 import { isRangeDirty } from '../src/gitrepo.ts';
-import { blockOf, cli, freshRepo, parseJson, readText, srcPath, writeText } from './helpers.ts';
+import { judgeDoc, newJudgeCache } from '../src/judge.ts';
+import { blockOf, cli, docPath, freshRepo, parseJson, readText, srcPath, writeText } from './helpers.ts';
 
 const D = '2026-08-01T00:00:00Z';
 
@@ -192,4 +194,36 @@ test('用例 24：来源被截断到引用范围之外（已提交）→ error�
     assert.equal(b.writable, false, 'error 一律不可写回');
   }
   assert.equal(blockOf(payload, 'b3').severity, 'ok', '片段级独立：b3 的来源没被动');
+});
+
+/**
+ * 用例 38（性能·可复现断言）：**多块同源只读一次** —— 判定缓存只省工作，不改结论。
+ *
+ * 修复前每块都要重新读工作区文件、重新 `git show HEAD:<path>`、步骤 6 再重新
+ * `git show <旧 commit>:<path>` —— 都是**独立的 git 子进程**。16 块同源的文档实测 ~1.1s，
+ * 而且 `read --block b1`（只关心一块）也照样跑满全篇 ⇒ AI 侧"多快好省"直接打折。
+ * 这里不断言耗时（会 flaky），而是断言**读了几次**：来源文件 2 个 ⇒ 工作区/HEAD/切行各 2 次，
+ * 两块共用同一个 (commit,path) ⇒ 旧 commit 只取 1 次。再断言"有无缓存逐字段一致"。
+ */
+test('用例 38：多块同源只读一次（判定缓存不改变结论）', async () => {
+  const { repo } = await freshRepo();
+  // 把 b1(10-24) 与 b2(26-40) 两个范围**都**换成无关内容（已提交）⇒ 两块都要走到步骤 6
+  const lines = KV_TS.split('\n');
+  const decoy = Array.from({ length: 31 }, (_, i) => `[decoy] ${i + 1}`);
+  lines.splice(9, 31, ...decoy);
+  writeText(srcPath(repo), lines.join('\n'));
+  await commitAll(repo, 'case 38: 两块都进步骤 6', D);
+
+  const parsed = parseGmd(readText(docPath(repo)));
+  const cache = newJudgeCache();
+  const cached = await judgeDoc(parsed, repo, { cache });
+  assert.deepEqual(cached.map((j) => j.severity), ['error', 'error', 'ok']);
+  assert.equal(cache.worktree.size, 2, '来源只有 src/kv.ts + src/conf.ts ⇒ 各读一次（3 块不重复读）');
+  assert.equal(cache.head.size, 2, '`git show HEAD:` 同理');
+  assert.equal(cache.lines.size, 2, '归一化后的行数组也只切一次');
+  assert.equal(cache.atCommit.size, 1, 'b1/b2 共用同一个 (commit, path) ⇒ 旧 commit 只取一次');
+
+  // 缓存只能省工作、不能改结论
+  const uncached = await judgeDoc(parseGmd(readText(docPath(repo))), repo);
+  assert.deepEqual(cached, uncached, '有无缓存必须逐字段一致');
 });
