@@ -12,7 +12,7 @@
 
 <!-- /gmd:block -->
 
-<!-- gmd:block {"id":"b2","hist":[{"rev":1,"at":"2026-07-01T09:00:00Z","path":"src/kv.ts","range":[26,40],"commit":"a1b2c3d4e5f60718293a4b5c6d7e8f9012345678","src_hash":"sha256:00aa11bb22cc33dd44ee55ff6677889900aa11bb22cc33dd44ee55ff6677889900","text_hash":"sha256:aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aa"}]} -->
+<!-- gmd:block {"id":"b2","hist":[{"rev":1,"at":"2026-07-01T09:00:00Z","path":"src/kv.ts","range":[26,40],"commit":"a1b2c3d4e5f60718293a4b5c6d7e8f9012345678","src_hash":"sha256:00aa11bb22cc33dd44ee55ff6677889900aa11bb22cc33dd44ee55ff66778899","text_hash":"sha256:aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"}]} -->
 
 ## `set(key, value): Promise<void>`
 

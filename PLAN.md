@@ -182,7 +182,7 @@ block     := "<!-- gmd:block " <JSON> "-->" 正文 "<!-- /gmd:block -->"
 
 <!-- /gmd:block -->
 
-<!-- gmd:block {"id":"b2","hist":[{"rev":1,"at":"2026-07-01T09:00:00Z","path":"src/kv.ts","range":[26,40],"commit":"a1b2c3d4e5f60718293a4b5c6d7e8f9012345678","src_hash":"sha256:00aa11bb22cc33dd44ee55ff6677889900aa11bb22cc33dd44ee55ff6677889900","text_hash":"sha256:aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aa"}]} -->
+<!-- gmd:block {"id":"b2","hist":[{"rev":1,"at":"2026-07-01T09:00:00Z","path":"src/kv.ts","range":[26,40],"commit":"a1b2c3d4e5f60718293a4b5c6d7e8f9012345678","src_hash":"sha256:00aa11bb22cc33dd44ee55ff6677889900aa11bb22cc33dd44ee55ff66778899","text_hash":"sha256:aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"}]} -->
 
 ## `set(key, value): Promise<void>`
 
@@ -196,6 +196,9 @@ block     := "<!-- gmd:block " <JSON> "-->" 正文 "<!-- /gmd:block -->"
 ```
 
 > 上例刻意展示：**块外的 "备注" 节是完全自由的普通 Markdown**。
+>
+> ⚠️ **执行者更正（2026-10-11）**：本示例原先 `b2` 的 `src_hash` / `text_hash` 是 **66 位** hex，与 §3.3 契约「`sha256:<64 位小写 hex>`」及 §4.1 的严格校验冲突 —— 照抄会被 `parseGmd` 判为**格式损坏（退出码 2）**。此处已按 **64 位**改正（只截掉多余的尾部两位），`docs/example.gmd` 同步修正；差异记录见 `docs/notes-plan-conflicts.md` §1.4。
+> 复现：`node --experimental-strip-types src/cli.ts read docs/example.gmd` 应**不再**报「格式损坏」（两个块的正文 hash 仍对不上，那属于刻意的示意值，会正常判 `error`）。
 
 ### 3.3 TypeScript 数据契约（`src/types.ts`，直接落地）
 
