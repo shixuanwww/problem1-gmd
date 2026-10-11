@@ -17,7 +17,18 @@ const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const HASH_RE = /^sha256:[0-9a-f]{64}$/;
 
 /** 本工具**认识**的字段；其余一律当扩展字段原样保留（前向兼容）。 */
-const KNOWN_VERSION_KEYS = new Set(['rev', 'at', 'path', 'range', 'commit', 'src_hash', 'text_hash', 'text', 'note']);
+const KNOWN_VERSION_KEYS = new Set([
+  'rev',
+  'at',
+  'path',
+  'range',
+  'commit',
+  'src_hash',
+  'src_base',
+  'text_hash',
+  'text',
+  'note',
+]);
 const KNOWN_BLOCK_KEYS = new Set(['id', 'hist']);
 
 /**
@@ -171,12 +182,13 @@ function validateVersion(raw: unknown, index: number, line: number): GmdVersion 
   if (typeof rev !== 'number' || !Number.isInteger(rev) || rev !== index + 1) {
     throw new GmdFormatError(`${where}.rev 必须从 1 起且连续（此处应为 ${index + 1}）`, line);
   }
-  const { at, path, range, commit, src_hash, text_hash, note } = v as {
+  const { at, path, range, commit, src_hash, src_base, text_hash, note } = v as {
     at?: unknown;
     path?: unknown;
     range?: unknown;
     commit?: unknown;
     src_hash?: unknown;
+    src_base?: unknown;
     text_hash?: unknown;
     note?: unknown;
   };
@@ -227,7 +239,12 @@ function validateVersion(raw: unknown, index: number, line: number): GmdVersion 
   if (note !== undefined && typeof note !== 'string') {
     throw new GmdFormatError(`${where}.note 若存在必须是字符串`, line);
   }
+  // src_base 只允许两个取值；缺省 = "commit"（旧文件语义不变）
+  if (src_base !== undefined && src_base !== 'commit' && src_base !== 'worktree') {
+    throw new GmdFormatError(`${where}.src_base 若存在必须是 "commit" 或 "worktree"`, line);
+  }
   const out: GmdVersion = { rev, at, path, range: [l0, l1], commit, src_hash, text_hash };
+  if (src_base === 'worktree') out.src_base = 'worktree';
   if (typeof text === 'string') out.text = text;
   if (typeof note === 'string') out.note = note;
   // 前向兼容：本工具不认识的字段**原样留着**，写回时再合并回去（不做静默丢弃）。
@@ -335,6 +352,7 @@ function wireVersion(v: GmdVersion): Record<string, unknown> {
     src_hash: v.src_hash,
     text_hash: v.text_hash,
   };
+  if (v.src_base === 'worktree') base.src_base = 'worktree';
   if (typeof v.text === 'string') base.text = v.text;
   if (typeof v.note === 'string') base.note = v.note;
   return mergeExtras(base, v[EXTRAS]);

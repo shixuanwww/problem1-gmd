@@ -211,6 +211,7 @@ export interface GmdVersion {
   range: [number, number];  // 1-based 闭区间 [l0, l1]，l0 <= l1
   commit: string;           // 记录时的仓库 HEAD commit 全 sha（= git rev-parse HEAD，§4.6.2）
   src_hash: string;         // "sha256:<hex>" —— 该 range 内文本的摘要
+  src_base?: 'commit' | 'worktree';  // src_hash 的基准；缺省 = commit（本轮新增，见 §4.6.2）
   text_hash: string;        // "sha256:<hex>" —— 本片段正文（换行归一化为 \n 后 trim）的摘要
   text?: string;            // 该版本的正文（阶段 4·3；本实现写出的版本一律带它，须与 text_hash 自洽）
   note?: string;            // 可选备注（序列化时须转义 "--"）
@@ -387,6 +388,11 @@ export class GmdFormatError extends Error {
              changes = []，currentSource = 该子串
 
 6) 相似度判定（区分"范围内内容变了" vs "整段被替换/删除"）—— **按范围长度分段**
+   ⚠️（本轮新增）**先分流 `v.src_base === 'worktree'`**：该版本是 `--allow-dirty` 写下的，
+      `src_hash` 取自**脏工作区**，"记录时的来源文本"没有可回溯的出处 ⇒ **不拿 HEAD 的文本
+      冒充**（那会给出误导性的变更点），如实降级为 warning 并说明：
+      reason = "该版本记录自未提交来源（src_base=worktree），无法回溯当时的来源文本"，
+      currentSource = 当前范围内容。
    oldText = git show v.commit:<path> 的 range 行     ← 仅用于内部计算
      （取不到，如 commit 已被 GC → error("无法回溯来源版本")）
    n = v.range[1] - v.range[0] + 1
@@ -723,7 +729,7 @@ node --experimental-strip-types --test tests/*.test.ts
 | **19b** | 手改 `.gmd` 正文（不追加版本）后 `read` | 该块 `severity === "error"`、`reason === "正文与元数据不一致"`、`currentSource === null`（§4.3 步骤 0，P1-3） |
 | **19c** | **单行范围的短引用**：`setup-fixtures.ts` 建一个 `range:[12,12]` 的块，再**改写该行内容**（**改动已提交**，见用例 0） | `severity === "warning"`（**不是 error**）—— 走 §4.3 步骤 6b 的字符集合 Jaccard（阈值 0.30）。旧版行集合 Jaccard 在 1 行上必退化为 `sim = 0`，会把题面定义的 warning 误判成 error |
 | **19d**（P3 补，**非可选**） | `read --plain`（只出正文）／`read --plain --json`（互斥） | 前者输出**不含**严重度 / 变更点 / 建议命令，**只出块正文**（给 `--block` → 该块正文；缺 `--block` → 按块顺序、空行分隔）；后者 → **参数错，退出码 1**。对应题面"可切换为只出正文"（§1.6 / §4.9） |
-| 20（可选，阶段 4·1） | 来源 dirty + `commit --allow-dirty` | 写回成功、`rev+1`，新版本 `note` 含 `based_on_dirty`，审计输出显著标注"基于未提交来源" |
+| 20（可选，阶段 4·1） | 来源 dirty + `commit --allow-dirty` | 写回成功、`rev+1`，新版本 `note` 含 `based_on_dirty` **且 `src_base=worktree`**（并断言不变式：`src_hash === hashRange(工作区该范围)`，且**不等于** `hashRange(git show HEAD:path 的该范围)`），审计输出显著标注"基于未提交来源"；缺省基准为 `commit` 的版本**不带** `src_base` 字段（形状稳定） |
 | 21（可选，阶段 4·2） | MCP：stdio 发 `tools/list` + `tools/call`（`gmd_read`） | 返回合法 JSON-RPC 响应，内容与 CLI `read --json` 一致 |
 | 22（可选，阶段 4·3） | `v.commit` 不是 `HEAD` 祖先（另起分支改来源后 commit） | 降级为 `warning`，reason 提示"来源来自其它分支" |
 | **23**（P2 补，**非可选**） | **换行不构成 dirty**：一段已提交的引用（其 `src_hash` 由 `hashRange` 实测）在工作区被换成 **CRLF** 字节（`core.autocrlf=true` 的 checkout 效果，或直接把 CRLF 写回工作区）、`HEAD` 里仍是 **LF**，引用范围内内容**语义相同**且**不提交** | `severity === "ok"`、`dirty === false`、`writable === true`（**不是** `warning`，也不禁止写回）—— 必须走 §4.3 步骤 3 的 `isRangeDirty` 唯一口径 `hashRange(nowText, range) !== hashRange(headText, range)`（两边都 `split(/\r\n|\r|\n/)` 后再以 `\n` 连接）；防止把 CRLF/LF 差异误判成"内容变了"（跑完把该文件恢复为 LF 并 `git checkout -- <path>`，避免污染后续用例） |
@@ -737,6 +743,7 @@ node --experimental-strip-types --test tests/*.test.ts
 | **31**（阶段 4·3，本轮新增） | 造出 rev1→rev2 后：`read --version 1 --block b1 --json` / `--plain` / 人读视图；再取 rev2 | `text` = **rev1 当时写下的正文**（不得拿活动正文冒充）；`active_severity` 标注的是活动版本（rev2 已 `ok`）；`--plain --version 1` 只出该版正文、不混进 rev2 内容；不带 `note` 的版本不凭空多出该字段 |
 | **32**（阶段 4·3 边界，本轮新增） | ① 手改 `hist[0].text` 但不改 `text_hash`；② 删掉 `text` 字段（模拟旧格式 / 手写骨架） | ① **码 2**（"text 与 text_hash 不一致"+行号）；② 仍能 `read` 且 `ok`，`read --version 1 --json` 给 `text: null`、`--version 1 --block b1 --plain` 的 stdout 为空 + stderr 说明"未存正文"（**不改退出码**）；不给 `--block` 时其余块的正文照常输出 |
 | **33**（前向兼容，本轮新增） | 给 `gmd:doc` / b1 块头 / b1 的 `hist[0]` / b2 块头各塞一个本工具不认识的字段，再对 b1 走一次 `edit → commit` | ① 加扩展字段**不影响判定**（b1 仍 `ok`）；② **b2 的块头与文档头逐字节不变**（`commit` 只重写目标片段）；③ b1 自己的**块头级与版本级扩展字段都不丢**（`future_block` / `future_ver` 仍在），且 b1 照常 `rev 2`、写回后仍 `ok` |
+| **34**（`--plain` 与失效片段，本轮新增） | 删掉 `src/kv.ts`（已提交，b1/b2 ⇒ error、b3 仍 ok）后 `read --plain`；再 `read --block b3 --plain` | ① 退出码 **3**（不因 `--plain` / `--block` 放宽）；② **stdout 仍是纯正文**（不含"失效/必须重写/[error]"）；③ **stderr** 点名 `b1、b2` 并给出 `gmd edit`；④ 窄化到 b3 时 stdout 只有 b3 正文、stderr 提醒"另有 2 个片段已失效（本次未输出）：b1、b2" |
 
 > 🔴 **用例 0 不是"随便跑一下"，是 3/5/7/13/16 的**前置条件**：演示与测试里每一次"改源文件"之后，都必须**显式提交**（见 §9.2 / §9.3 的注解），否则 dirty 短路让这些用例断言失败。**全文唯一允许不提交源改动的地方是用例 6、用例 14 与用例 23**（23 只改换行字节：CRLF 工作区 vs LF HEAD，属"换行不构成 dirty"）。**
 
@@ -852,7 +859,8 @@ node --experimental-strip-types demo/warning-loop.ts         # 阶段 3：无人
 | `log --range` 的边界与降级 | `a > b` 或 `a < 1` → 参数错**码 1**；`b > 当前文件行数` → **不调用** `git log -L`，降级为"列出该文件全部提交并标注 `range 超出当前文件行数`"；**任何** git 非零退出（含 128、超时、`-L` 在重命名 / 合并历史上报错）→ 一律**码 5**（打印 stderr 首行），**不得**当成"没有提交"或静默吞掉；`git show v.commit:<path>` 取不到 → 该块 `error("无法回溯来源版本")`（§4.8 / §4.3 步骤 6） |
 | 追加版本的 `range` | `commit` **沿用它记录的旧范围**（阶段 1–3 不做符号 / 选区级引用 —— 那是阶段 4）；`commit = git rev-parse HEAD`、`src_hash = hashRange(当前文件文本, range)` 均重算（§4.6.2） |
 | 草稿文件命名 | `<repo>/.gmd/tmp/<doc 相对路径的分隔符→下划线>-<sha256(文档绝对路径) 前 8 位>-<block>.draft.md`；目标已存在则**覆盖**并打印 `覆盖已有草稿: <path>`（**不**静默追加编号）；规则写进 README（§4.6.1） |
-| `--allow-dirty` 语义（阶段 4 选做） | 若实现：**审计输出显著标注"此版本基于未提交来源"**，新版本 `note` 写入 `based_on_dirty`；**不做也须接受该 flag 并给出明确提示**（§4.6.2） |
+| `--allow-dirty` 语义（阶段 4 选做） | 若实现：**审计输出显著标注"此版本基于未提交来源"**，新版本 `note` 写入 `based_on_dirty`，且 **`src_base` 记 `worktree`**（`commit` 记 HEAD 而 `src_hash` 取自脏工作区 ⇒ 必须把基准写成字段，不变式 `src_hash === hashRange(该基准下的范围文本, range)` 才成立）；**不做也须接受该 flag 并给出明确提示**（§4.6.2 / §4.3 步骤 6 的 worktree 分流） |
+| `read --plain` 与失效片段（本轮新增） | **stdout 严格只出正文**（"只出正文"是题面参考接口的承诺，不塞提示）；失效片段（`error`）在 **stderr** 点名 + 给出 `gmd read` / `gmd edit` 下一步；`--block` 窄化时若失效的是别的块也提醒一句；退出码仍按**整篇文档**算（§4.3 / §8 用例 34） |
 | 从零建文档 | **不提供 `gmd new` 子命令**（题面参考接口只有 `read`/`log`/`edit`/`commit`）；按 §3.1 **手写** `gmd:doc` / `gmd:block` 骨架，`hist[0]` 的 `src_hash` 用 `hashRange` 实测；README"快速开始"必须给出可复制的最小骨架（§5 阶段 3） |
 | 历史正文（阶段 4·3，已实现） | 字段为 `hist[i].text`（**不是**原稿预留的 `hist_text[]` —— 见 §4.7 的理由）；解析时校验 `textHash(text) === text_hash`，否则**码 2**；`read --version --json` 缺正文时给 `text: null`、`--plain` 走 stderr 说明且**不改退出码**；README 已如实说明"文件随版本数线性膨胀"（§4.7 / §8 用例 31、32） |
 | 语言 / 运行环境 | **TypeScript + Node**（零第三方依赖，唯一外部程序是 `git`）；**Node ≥ 22.6（建议 ≥ 22.18）** + `node --experimental-strip-types`；相对 import 必须带 `.ts` 后缀；禁用 `enum` / `namespace` / 装饰器 / 构造函数参数属性 / `tsconfig paths` 别名（§0 第 2 条 / §2 / §2.1） |

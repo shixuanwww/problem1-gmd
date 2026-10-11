@@ -214,6 +214,15 @@ export async function judgeBlock(block: GmdBlock, repo: string, opts: JudgeOptio
   }
 
   // ---- 步骤 6：相似度分段判定 ----
+  // 记录时的基准是**工作区**（`--allow-dirty` 写下的版本）⇒ 当时的来源文本只存在于那一刻的
+  // 工作区里，没有可回溯的出处。此时**不拿 HEAD 的文本冒充**"记录时内容"（那会给出误导性的
+  // 变更点），如实降级为 warning 并说明原因。
+  if (v.src_base === 'worktree') {
+    return judgement(block, 'warning', '该版本记录自未提交来源（src_base=worktree），无法回溯当时的来源文本', {
+      currentSource: inRangeNow(),
+    });
+  }
+
   let oldText: string | null;
   try {
     oldText = await showText(repo, v.commit, v.path);

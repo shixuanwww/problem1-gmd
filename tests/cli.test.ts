@@ -90,6 +90,33 @@ test('用例 19d：read --plain 只出正文；与 --json 互斥（退出码 1�
   assert.equal(conflict.code, 1, '--plain 与 --json 必须互斥');
 });
 
+/**
+ * 用例 34：`read --plain` 的 stdout 保持**纯正文**，但必须在 **stderr** 点明哪些片段已失效。
+ *
+ * 背景：`--plain` 输出的是块自身正文，而失效（`error`）的块恰好**必须重写**（题面 §2.4）。
+ * 只靠退出码 3，AI 在多块文档里**不知道失效的是哪一块** —— 这正是"补丁式改一段已经不适用的文字"
+ * 的入口。这里**不改 stdout 语义**（"只出正文"是题面参考接口的承诺），只把那一条缺失的信息补上。
+ */
+test('用例 34：read --plain 必须在 stderr 点明失效片段（stdout 仍是纯正文）', async () => {
+  const { repo } = await freshRepo();
+  rmSync(srcPath(repo)); // b1/b2 的来源被删 ⇒ error；b3 的来源是 src/conf.ts，仍 ok
+  await commitAll(repo, 'case 34: 删除 src/kv.ts', D);
+
+  const plain = await cli(['read', 'docs/api.gmd', '--plain', '--repo', repo]);
+  assert.equal(plain.code, 3, '存在 error 块 ⇒ 退出码 3（不因 --plain 放宽）');
+  assert.match(plain.out, /按键取值/, 'stdout 仍是正文');
+  assert.doesNotMatch(plain.out, /失效|必须重写|\[error\]/, 'stdout 不得混进提示文字');
+  assert.match(plain.err, /b1、b2|b2、b1/, 'stderr 必须点名失效的片段');
+  assert.match(plain.err, /gmd edit/, '必须给出下一步命令');
+
+  // 窄化到仍然可用的块：stdout 只有该块正文，stderr 仍提醒文档里另有失效片段
+  const narrowed = await cli(['read', 'docs/api.gmd', '--block', 'b3', '--plain', '--repo', repo]);
+  assert.equal(narrowed.code, 3, '退出码仍按整篇文档算');
+  assert.match(narrowed.out, /默认端口/);
+  assert.doesNotMatch(narrowed.out, /失效/);
+  assert.match(narrowed.err, /另有 2 个片段已失效[\s\S]*b1/);
+});
+
 test('用例 19 补：日志的三种参数组合都能落地，read --version 给出该版本来源信息与历史正文', async () => {
   const { repo } = await freshRepo();
 

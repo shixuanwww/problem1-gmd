@@ -288,6 +288,20 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
       if (plain) {
         io.out(renderPlainBody(doc, typeof blockFlag === 'string' ? blockFlag : undefined));
         const judgements = await judgeDoc(doc, repo);
+        // `--plain` 只出正文、不带严重度标记 —— stdout 必须保持"纯正文"，但**不能**让 AI
+        // 拿到一段失效的正文却不知道它是哪一块（题面：error 档"必须重写"）。所以在 stderr 点名
+        // 并给出下一步命令；退出码仍按**整篇文档**算，不因 --plain / --block 放宽。
+        const selected = typeof blockFlag === 'string' ? judgements.filter((j) => j.id === blockFlag) : judgements;
+        const stale = selected.filter((j) => j.severity === 'error').map((j) => j.id);
+        const staleElsewhere = judgements
+          .filter((j) => j.severity === 'error' && !selected.some((s) => s.id === j.id))
+          .map((j) => j.id);
+        if (stale.length > 0) {
+          io.err(`※ 你刚拿到的正文里有 ${stale.length} 个片段已失效、必须重写：${stale.join('、')}`);
+          io.err(`  看冲突视图：gmd read ${docRel}；生成草稿：gmd edit ${docRel} --block <id>`);
+        } else if (staleElsewhere.length > 0) {
+          io.err(`※ 提示：本文档另有 ${staleElsewhere.length} 个片段已失效（本次未输出）：${staleElsewhere.join('、')}`);
+        }
         return judgements.some((j) => j.severity === 'error') ? EXIT.HAS_ERROR_BLOCK : EXIT.OK;
       }
 

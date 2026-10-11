@@ -65,6 +65,7 @@ block     := "<!-- gmd:block " <JSON> "-->" 正文 "<!-- /gmd:block -->"
 | | `range` | 引用的**源文件行范围**，1-based 闭区间 `[l0,l1]` |
 | | `commit` | 记录时的仓库 HEAD 全 sha |
 | | `src_hash` | `range` 内文本的摘要（`sha256:<hex>`） |
+| | `src_base` | 可选：`src_hash` 的**基准**。缺省 = `commit`（对 `git show <commit>:<path>` 的该范围取哈希）；`worktree` = 取自**脏工作区**（`--allow-dirty` 写下的版本）。有了它，不变式 `src_hash === hashRange(该基准下的范围文本, range)` **永远成立、可机器校验** |
 | | `text_hash` | 本片段正文（换行归一化后 `trim`）的摘要 |
 | | `text` | **该版本的正文**（阶段 4·3）。本实现写出的版本**一律带它**，于是 `gmd read --version <rev>` 能取回"那一版写了什么"，`text_hash` 也从"不可验证的承诺"变成**可验证的摘要**（解析时校验二者一致，不一致即码 2）。代价是每追加一版多存一份正文（见 §5.3）；旧格式文件可缺此字段，那一版只取不到正文 |
 | | `note` | 可选备注（如 `based_on_dirty`） |
@@ -190,6 +191,10 @@ gmd commit <doc> --block <id> [--input <file|->] [--allow-dirty] [--path <src>] 
 
 `--plain` 也可以和 `--version <rev>` 组合：**只出那一版的历史正文**（题面参考接口"取正文"最直接的形态）。若该版本是旧格式文件、没存正文，stdout 不输出内容、stderr 明确说明是哪一版缺正文 —— 取不到正文不是错误，**不用退出码惩罚调用方**。
 
+**`--plain` 不带严重度标记，所以失效片段在 stderr 点名**：`error` 档的动作是"**必须重写**"，而 `--plain` 输出的正是块自身正文 —— 只给一个退出码 3，AI 在多块文档里**不知道失效的是哪一块**，很容易去补丁式改一段已经不适用的文字（正是题面 §2.4 警告的行为）。所以：**stdout 严格保持"纯正文"**（这是参考接口的承诺，不塞任何提示），**stderr** 点明"你刚拿到的正文里有哪几块已失效"并给出 `gmd read` / `gmd edit` 的下一步；用 `--block` 窄化时，若失效的是**别的**块也会提醒一句。退出码仍按整篇文档算。
+
+> ⚠️ 注意"隐藏旧文字"的**对象**：题面说的是 `error` 时不回显**来源**的旧文字（"留着它，AI 就会去补丁式修改，而**引用目标已经不在了**"），所以本项目隐藏的是 `currentSource`；块自身的正文属于**文档内容**，`--plain`（"取正文"）照常给出，但会如上在 stderr 说明它的状态。
+
 ### 4.4 `gmd edit` / `gmd commit`（阶段 3：改得回）
 
 - **草稿** = `<!-- gmd:draft {"doc","block","base_rev","at"} -->` 头 + 当前正文；路径 `<repo>/.gmd/tmp/<doc 相对路径的分隔符→下划线>-<sha256(文档绝对路径)前8位>-<block>.draft.md`；目标已存在则**覆盖**并提示（不静默追加编号）。
@@ -202,6 +207,8 @@ gmd commit <doc> --block <id> [--input <file|->] [--allow-dirty] [--path <src>] 
 ### 4.5 `--allow-dirty`（阶段 4·1，已实现）
 
 来源范围有未提交修改、但显式加 `--allow-dirty` 时：**允许写回**，并在**审计输出**（stderr）显著标注"此版本基于**未提交来源**"，新版本的 `note` 写入 **`based_on_dirty`**。不加该 flag 时严格拒绝（题面硬约束 5："不伪造正式版本"）。
+
+同时新版本的 `src_base` 记为 **`worktree`**：这一版的 `src_hash` 取的是**脏工作区**，而 `commit` 记的是 HEAD，两者本就不同源 —— 写进字段后 `src_hash === hashRange(该基准下的范围文本, range)` 才可校验（缺省 `commit` 的版本没有这个字段）。**副作用**：若某天需要"记录时的来源文本"来算变更点（判定步骤 6），这类版本没有可回溯的出处，工具会**如实降级为 `warning` 并说明**，而不是拿 HEAD 的文本冒充。
 
 ### 4.6 `commit --path / --range`：重新绑定引用（阶段 4）
 
@@ -239,9 +246,11 @@ gmd commit docs/api.gmd --block b1 --path src/conf.ts --range 9..13 --input new-
 - 三档判定（步骤 0 → 6 全实现）、行号漂移锚定、分段相似度、error 隐藏旧文字、**步骤 3.5 范围越界必判 `error`**（防 `hashRange` 静默截断伪造成 `ok`）
 - CLI：`read`（冲突视图 / `--plain` / `--json` / `--version`）、`log`（片段历史 / 来源提交历史 / `--range` 过滤与降级）、`edit`（草稿）、`commit`（草稿头剥离 + 五道校验 + 原子写 + 追加版本）
 - `--allow-dirty` 受控写回（阶段 4·1，`note=based_on_dirty` + 审计标注）
+- **`src_base` 明示 `src_hash` 的基准**（缺省 `commit` / `--allow-dirty` 时为 `worktree`）：`--allow-dirty` 的 `commit`(HEAD) 与 `src_hash`(脏工作区) 不同源这件事，从"读者自己猜"变成**显式字段 + 可校验的不变式**
 - `commit --path / --range` **重新绑定引用**（阶段 4·2）：`error` 档"重写后把引用改指到仍存在的来源"⇒ 闭环打通；新来源照样过存在性 / 越界 / dirty 三道闸，历史版本各自的 `path`/`range` 不被改写
 - **每一版的正文内嵌**（阶段 4·3，`hist[].text`）：`read --version <rev>` 取回"那一版写了什么"（`--plain --version` 只出该版正文）；`text_hash` 变成可验证的摘要
 - **前向兼容**：本工具不认识的扩展字段（`gmd:doc` / 块头 / 版本记录任一层）**原样保留**；`commit` 只重写目标片段，其它片段逐字节不变（§2.1 纪律 6）
+- **`--plain` 的失效提示走 stderr**：stdout 严格保持纯正文，stderr 点明哪些片段已失效并给出下一步命令（见 §4.3）
 - 退出码 0–5；`--json` 契约；`--repo` 定位；git 子进程 15s 超时 + `-C` 指定仓库
 
 **未实现**（如实声明，未做不算缺）

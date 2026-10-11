@@ -10,12 +10,14 @@ import { test } from 'node:test';
 
 import { CONF_TS, KV_TS, commitAll } from '../scripts/setup-fixtures.ts';
 import { parseGmd } from '../src/format.ts';
+import { hashRange } from '../src/gitrepo.ts';
 import {
   blockOf,
   cli,
   docPath,
   editBlockHead,
   freshRepo,
+  git,
   outsideText,
   parseJson,
   readText,
@@ -169,6 +171,7 @@ test('用例 20（阶段 4·1）：来源 dirty + commit --allow-dirty → 写�
 
   const log = await cli(['log', 'docs/api.gmd', '--block', 'b1', '--repo', repo]);
   assert.match(log.out, /note=based_on_dirty/);
+  assert.match(log.out, /src_base=worktree/, '必须点明 src_hash 取自脏工作区（commit 记的是 HEAD）');
   assert.match(log.out, /rev 2/);
 
   const logJson = parseJson((await cli(['log', 'docs/api.gmd', '--block', 'b1', '--json', '--repo', repo])).out) as Array<
@@ -176,6 +179,19 @@ test('用例 20（阶段 4·1）：来源 dirty + commit --allow-dirty → 写�
   >;
   assert.equal(logJson[1].note, 'based_on_dirty', '机器可读输出必须能分辨"基于未提交来源"的版本');
   assert.equal('note' in logJson[0], false, '无 note 的版本不应凭空多出该字段（形状保持稳定）');
+  assert.equal(logJson[1].src_base, 'worktree', '--allow-dirty 版本的 src_hash 基准是工作区');
+  assert.equal('src_base' in logJson[0], false, '基准为缺省 commit 的版本不应凭空多出该字段');
+
+  // 不变式：src_hash 必须等于"**它自己声明的基准**处的范围文本"的哈希
+  const parsedDoc = parseGmd(readText(docPath(repo)));
+  const v2 = parsedDoc.blocks.find((b) => b.id === 'b1')!.hist[1];
+  assert.equal(v2.src_base, 'worktree');
+  assert.equal(v2.src_hash, hashRange(readText(srcPath(repo)), v2.range), 'src_base=worktree ⇒ 对工作区文本取哈希');
+  assert.notEqual(
+    v2.src_hash,
+    hashRange(await git(repo, ['show', 'HEAD:src/kv.ts']), v2.range),
+    '正因为与 HEAD 不同源，才必须把基准写在字段里（这正是修复前的不自洽）',
+  );
 });
 
 /**

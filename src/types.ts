@@ -24,6 +24,18 @@ export interface GmdVersion {
   range: [number, number]; // 1-based 闭区间 [l0, l1]，l0 <= l1
   commit: string; // 记录时的仓库 HEAD commit 全 sha（= git rev-parse HEAD）
   src_hash: string; // "sha256:<hex>" —— 该 range 内文本的摘要
+  /**
+   * `src_hash` 的**基准**（阶段 4·1 的收口）：
+   *  - `"commit"`（缺省）：`src_hash = hashRange(git show <commit>:<path>, range)`
+   *  - `"worktree"`：`src_hash = hashRange(--allow-dirty 当时的工作区文件, range)`
+   *
+   * 为什么要有这个字段：`--allow-dirty` 写出的版本里 `commit` 记的是 **HEAD**，而 `src_hash`
+   * 取的是**脏工作区** —— 两者本就不同源。与其留一个"读者得自己猜"的组合（`git show <commit>`
+   * 再按 range 哈希，得到的值与 `src_hash` 对不上），不如把基准写成字段，于是不变式
+   * `src_hash === hashRange(该基准下的范围文本, range)` **永远成立、可机器校验**。
+   * 字段不存在 = `"commit"`，旧文件语义不变。
+   */
+  src_base?: 'commit' | 'worktree';
   text_hash: string; // "sha256:<hex>" —— 本片段正文（换行归一化为 \n 后 trim）的摘要
   /**
    * 该版本的**正文**（阶段 4·3）。

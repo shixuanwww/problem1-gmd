@@ -111,7 +111,8 @@ export function renderLogBlock(docRel: string, block: GmdBlock): string {
   for (const v of block.hist) {
     lines.push(
       `  rev ${v.rev}  ${v.at}  ${v.path}:${v.range[0]}-${v.range[1]}  ${shortSha(v.commit)}  ${shortHash(v.src_hash)}` +
-        (v.note ? `   note=${v.note}` : ''),
+        (v.note ? `   note=${v.note}` : '') +
+        (v.src_base === 'worktree' ? '   src_base=worktree' : ''),
     );
   }
   return lines.join('\n');
@@ -160,6 +161,8 @@ export function versionToJson(v: GmdVersion): Record<string, unknown> {
   // 那是"此版本基于未提交来源"的**机器可读审计标记**；只在人类可读视图里显示，
   // 用 `--json` 的 AI 就分辨不出这一版是不是脏来源产物。
   if (typeof v.note === 'string') out.note = v.note;
+  // 同理只在存在时附加：`src_base=worktree` 说明 `src_hash` 取自脏工作区（见 types.ts）。
+  if (v.src_base === 'worktree') out.src_base = 'worktree';
   return out;
 }
 
@@ -181,7 +184,9 @@ export function renderVersionView(docRel: string, rev: number, rows: VersionRow[
   for (const r of rows) {
     const v = r.version;
     lines.push(
-      `${r.block}  rev ${v.rev}  ${v.at}  ${v.path}:${v.range[0]}-${v.range[1]}  ${shortSha(v.commit)}  ${shortHash(v.src_hash)}`,
+      `${r.block}  rev ${v.rev}  ${v.at}  ${v.path}:${v.range[0]}-${v.range[1]}  ${shortSha(v.commit)}  ${shortHash(v.src_hash)}` +
+        (v.note ? `   note=${v.note}` : '') +
+        (v.src_base === 'worktree' ? '   src_base=worktree' : ''),
     );
     if (r.activeSeverity !== undefined) lines.push(`  该块当前严重度：${r.activeSeverity}`);
     if (typeof v.text === 'string') {

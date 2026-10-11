@@ -191,6 +191,9 @@ export async function commitBlock(opts: CommitOptions): Promise<CommitResult> {
     text: normalizeNewlines(newBody),
   };
   if (dirty) version.note = 'based_on_dirty';
+  // `--allow-dirty` 的收口：这一版的 `src_hash` 取自**脏工作区**，而 `commit` 记的是 HEAD，
+  // 两者不同源 —— 把基准写成字段，`src_hash === hashRange(基准处的范围文本, range)` 才可校验。
+  if (dirty) version.src_base = 'worktree';
 
   // 目标块：`{ ...b }` 保留它的块头扩展字段（EXTRAS 是 Symbol 键，展开才带得走）；
   // 其它块原样传入 —— `serializeGmd` 只重写 `rewriteIds` 里的片段，其余逐字节拷贝。
