@@ -139,6 +139,7 @@ block     := "<!-- gmd:block " <JSON> "-->" 正文 "<!-- /gmd:block -->"
 - **只看 `v.range`**：同一文件其它地方的改动**不算过期**（题面："判断只看被引用的范围"）。dirty 检查也只是范围级，函数是 `isRangeDirty(path, range)`，不是整文件级的。
 - **`error` 时 `currentSource = null`、`changes = []`**：题面"error 刻意隐藏旧文字"（留着旧文字会诱导 AI 做补丁式修改，而引用目标已不在）。
 - **判定依据永远是工作区（worktree）当前内容**，不是 `HEAD`（题面"基于读取时的真实仓库状态判断，不用陈旧缓存"）。
+- **给 AI 看的"来源预览"有界**（`diff.ts` 的 `boundedPreview`）：变更点每行最多 **200 字符**、`currentSource` 单行 200 字符 / 总计 **20000 字符**，超了才截断并以 `…` 收尾，同时用 `before_chars` / `after_chars` / `currentSource_chars` 给出**原始字符数**。**为什么必需**：一行 300KB（minified bundle、单行 JSON 的真实形态）修复前会让冲突视图与 `--json` 各吐 ~900KB —— 既烧上下文、模型又没法用；截断后 ~1KB。⚠️ **判定与哈希全部基于原文**，被截断的只是预览。
 
 ### 3.3 换行归一化的唯一口径（避免"自证不一致"）
 
@@ -202,6 +203,7 @@ gmd commit <doc> --block <id> [--input <file|->] [--allow-dirty] [--path <src>] 
 > 2. `log --block --json` 的元素在**该版本有 `note` 时**附加 `note` —— 这是 `--allow-dirty` 写下的 `based_on_dirty`，是"此版本基于未提交来源"的**机器可读审计标记**；没有 `note` 的版本不会凭空多出该字段（形状保持稳定）。
 > 3. `commit --json` 在**本次用 `--path` 重新绑定**来源时附加 `path`（新来源路径）；不重绑时形状与原来完全一致。（只给 `--range` 时不会多字段 —— 新范围本来就在 `range` 里。）
 > 4. `read --json` 在**真的发生"围栏忽略"**时附加 `fence_ignored: [{line, kind}]`（见 §2.1 纪律 5）。为什么必须有：围栏把真片段包起来时文档会**静默变成 0 片段**，只给 `{"doc":…,"blocks":[]}` 的 AI 会以为"这文档没问题"；带上这一项才知道"片段数为什么是 0"。
+> 5. `read --json` 的**有界预览**：超长时 `changes[].before/after` 被截断（并附加 `before_chars`/`after_chars` = 原始字符数）、`currentSource` 被截断（并附加 `currentSource_chars`）。三者是**独立字段**，不是把说明文字混进数据里；正常文档（未超长）时它们**一个都不出现**（形状稳定，用例 39 有反向断言）。
 
 ### 4.3 `--plain`（别名 `--body`）—— 只出正文
 
@@ -272,6 +274,8 @@ gmd commit docs/api.gmd --block b1 --path src/conf.ts --range 9..13 --input new-
 - **选项归属严格**：不属于该子命令的选项 → 码 1，绝不静默忽略（见 §4 归属表）
 - **"片段不存在"四个子命令同码**：`read` / `log` / `edit` / `commit` 一律 **1**（不再出现 `commit` 回 4 的特例）；`--input` 指向目录也判 **1**（不是环境错 5）
 - **判定路径不再重复劳动**：一轮 `judgeDoc` 内共享"来源文本 / HEAD 文本 / 旧 commit 文本 / 已切分行"缓存（见 §3 注），16 块同源文档 `read` 约 **300ms**（原 ~1.1s），语义逐字段不变
+- **给 AI 的输出有界**：超长行/超长范围只截断**预览**（判定与哈希基于原文），并给原始字符数（见 §3.2）
+- **`read --json` 的块形状由 `judgementToJson` 白名单出**：对外契约只在一处定义，内部结构将来加字段不会顺手泄漏进契约
 - 退出码 0–5；`--json` 契约；`--repo` 定位；git 子进程 15s 超时 + `-C` 指定仓库
 
 **未实现**（如实声明，未做不算缺）

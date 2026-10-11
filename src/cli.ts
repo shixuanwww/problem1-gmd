@@ -37,6 +37,7 @@ import {
   renderPlainBody,
   renderReadView,
   renderVersionView,
+  judgementToJson,
   shortHash,
   shortSha,
   toJson,
@@ -346,7 +347,9 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
         io.out(
           toJson({
             doc: doc.doc,
-            blocks: selected,
+            // 🔒 走 judgementToJson 的**白名单**形状：`read --json` 的块契约只在这一处定义，
+            // 内部结构将来加字段也不会"顺手泄漏"进对外契约（此前直接序列化原始对象，这个函数是死代码）。
+            blocks: selected.map(judgementToJson),
             // 可选扩展（与 changes_omitted / note 同一先例）：**仅在真的发生围栏忽略时**出现，
             // 让用 --json 的 AI 也能知道"片段数为什么是 0 / 为什么少了几块"。
             ...(doc.ignoredInFence.length > 0 ? { fence_ignored: doc.ignoredInFence } : {}),

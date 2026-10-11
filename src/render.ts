@@ -41,8 +41,10 @@ function renderChanges(changes: ChangePoint[], omitted: number): string[] {
     const head = `  L${c.line}`;
     const before = c.before === null ? '（当时不存在）' : c.before;
     const after = c.after === null ? '（已删除）' : c.after;
-    out.push(`${head}  记录时: ${before}`);
-    out.push(`${' '.repeat(head.length)}  当前:   ${after}`);
+    // 超长行会被截断（见 diff.ts 的 boundedPreview），这里把**原始字符数**说清楚
+    const cut = (s: string, n: number | undefined) => (n === undefined ? s : `${s}  ←该行共 ${n} 字符，已截断`);
+    out.push(`${head}  记录时: ${cut(before, c.before_chars)}`);
+    out.push(`${' '.repeat(head.length)}  当前:   ${cut(after, c.after_chars)}`);
   });
   if (omitted > 0) out.push(`  ... 其余 ${omitted} 处变更略`);
   return out;
@@ -82,7 +84,9 @@ export function renderReadView(doc: GmdDoc, judgements: BlockJudgement[], opts: 
     }
 
     if (j.currentSource !== null) {
-      lines.push(`  当前内容 (${j.source.path}:${j.source.range[0]}-${j.source.range[1]}):`);
+      const cutNote =
+        j.currentSource_chars === undefined ? '' : `（原文 ${j.currentSource_chars} 字符，已截断到预览长度；判定与哈希基于原文）`;
+      lines.push(`  当前内容 (${j.source.path}:${j.source.range[0]}-${j.source.range[1]})${cutNote}:`);
       lines.push(...indentLines(j.currentSource, '    | '));
     } else if (j.severity === 'error') {
       lines.push('  当前内容 已刻意隐藏（引用目标已不在；留着旧文字会诱导补丁式修改）');
@@ -214,5 +218,7 @@ export function judgementToJson(j: BlockJudgement): Record<string, unknown> {
     currentSource: j.currentSource,
   };
   if (j.changes_omitted !== undefined) out.changes_omitted = j.changes_omitted;
+  // 同理：只在"真的截断过"时出现（见 diff.ts / judge.ts 的有界预览）
+  if (j.currentSource_chars !== undefined) out.currentSource_chars = j.currentSource_chars;
   return out;
 }

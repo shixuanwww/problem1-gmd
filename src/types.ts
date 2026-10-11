@@ -102,6 +102,9 @@ export interface ChangePoint {
   line: number; // 源文件当前行号
   before: string | null; // 记录时该行（null = 当时不存在）
   after: string | null; // 当前该行（null = 已删除）
+  /** 该行被截断时，**原始**字符数（仅超长行出现；见 diff.ts 的 boundedPreview）。 */
+  before_chars?: number;
+  after_chars?: number;
 }
 
 export interface BlockJudgement {
@@ -114,6 +117,8 @@ export interface BlockJudgement {
   writable: boolean; // 是否允许写回：= !dirty && severity !== 'error'
   changes: ChangePoint[]; // warning 时给出变更点；error/ok 时为空数组
   currentSource: string | null; // warning/ok 时的"来源当前内容"；error 时必须为 null
+  /** `currentSource` 被截断时，**原始**字符数（仅超长范围出现）。 */
+  currentSource_chars?: number;
   /**
    * PLAN §4.5 的截断注记：changes 超过 20 条被截断时，被略过的条数。
    * 属对 §3.3 契约的**可选扩展**（不改变既有字段语义，JSON 解析仍稳定）。

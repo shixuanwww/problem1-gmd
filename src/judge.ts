@@ -30,7 +30,7 @@ import {
   textHash,
   worktreeFileExists,
 } from './gitrepo.ts';
-import { recordChanges } from './diff.ts';
+import { boundedPreview, recordChanges } from './diff.ts';
 
 /** 行号漂移搜索窗口：range ± 50 行（PLAN §11）。 */
 export const ANCHOR_WINDOW = 50;
@@ -40,6 +40,10 @@ export const SIM_THRESHOLD_LINE_SET = 0.2;
 export const SIM_THRESHOLD_CHAR_SET = 0.3;
 /** 少于多少行改用字符集合（短引用下行集合必然退化，见 PLAN §4.3 步骤 6b）。 */
 export const MIN_LINES_FOR_LINE_SET = 3;
+/** `currentSource` 的单行字符上限（超长行不能原样进给 AI 的输出）。 */
+export const MAX_SOURCE_LINE_CHARS = 200;
+/** `currentSource` 的总字符上限（正常引用远低于它；只挡"引用一万行 / 单行几百 KB"）。 */
+export const MAX_SOURCE_TOTAL_CHARS = 20000;
 
 export interface JudgeOptions {
   /**
@@ -113,7 +117,7 @@ function judgement(
 ): BlockJudgement {
   const v = block.hist[block.hist.length - 1];
   const dirty = extra.dirty === true;
-  return {
+  const out: BlockJudgement = {
     id: block.id,
     severity,
     rev: v.rev,
@@ -125,6 +129,16 @@ function judgement(
     currentSource: null,
     ...extra,
   };
+  // 🔒 给 AI 看的"来源当前内容"必须有界（见 diff.ts 的 boundedPreview）：原文不动，
+  // 只在超长时截断并记下**原始字符数** —— 判定与哈希全部基于原文，不受影响。
+  if (typeof out.currentSource === 'string' && out.currentSource.length > MAX_SOURCE_LINE_CHARS) {
+    const preview = boundedPreview(out.currentSource, MAX_SOURCE_LINE_CHARS, MAX_SOURCE_TOTAL_CHARS);
+    if (preview !== out.currentSource) {
+      out.currentSource_chars = out.currentSource.length;
+      out.currentSource = preview;
+    }
+  }
+  return out;
 }
 
 /** 记一个 error 块：**永远不带旧文字**（题面"刻意隐藏旧文字"）。 */
@@ -325,10 +339,4 @@ export async function judgeDoc(parsed: ParsedGmd, repo: string, opts: JudgeOptio
     }
   }
   return out;
-}
-
-export function worstSeverity(judgements: BlockJudgement[]): Severity {
-  if (judgements.some((j) => j.severity === 'error')) return 'error';
-  if (judgements.some((j) => j.severity === 'warning')) return 'warning';
-  return 'ok';
 }

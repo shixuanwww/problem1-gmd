@@ -227,3 +227,53 @@ test('用例 38：多块同源只读一次（判定缓存不改变结论）', as
   const uncached = await judgeDoc(parseGmd(readText(docPath(repo))), repo);
   assert.deepEqual(cached, uncached, '有无缓存必须逐字段一致');
 });
+
+/**
+ * 用例 39：**超长单行不得把给 AI 的输出撑爆**（截断 + 如实给原始字符数）。
+ *
+ * 修复前：一行 300KB（minified bundle / 单行 JSON 的真实形态）会让 `read` 的冲突视图与
+ * `--json` 各吐 ~900KB —— 变更点 before+after + currentSource 全是整行。既烧上下文，模型
+ * 也没法用。现在只在**预览**上截断（判定与哈希仍基于原文），并给出 `*_chars` 原始长度；
+ * 正常引用范围**不受影响**（下面第一条断言就是防"顺手把正常文档也截了"）。
+ */
+test('用例 39：超长行截断（并给原始字符数）；正常文档不出现任何截断标记', async () => {
+  const { repo } = await freshRepo();
+  const normal = (await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out;
+  assert.doesNotMatch(normal, /_chars/, '正常引用范围不该被截断（截断只在超长时发生）');
+
+  // 把 b1 引用范围内的一行换成 300KB 长行（已提交 ⇒ 走 warning + changes + currentSource）
+  const lines = KV_TS.split('\n');
+  lines[14] = 'y'.repeat(300_000);
+  writeText(srcPath(repo), lines.join('\n'));
+  await commitAll(repo, 'case 39: 极长单行', D);
+
+  const view = await cli(['read', 'docs/api.gmd', '--repo', repo]);
+  assert.equal(view.code, 0, view.err);
+  assert.ok(view.out.length < 20_000, `人读视图必须被截断，实际 ${view.out.length} 字节`);
+  assert.match(view.out, /已截断/, '必须显式说明截断');
+  assert.match(view.out, /共 300000 字符/, '必须给出原始字符数');
+
+  const payload = parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out) as {
+    blocks: Array<{
+      id: string;
+      severity: string;
+      dirty: boolean;
+      changes: Array<{ after: string | null; after_chars?: number }>;
+      currentSource: string | null;
+      currentSource_chars?: number;
+    }>;
+  };
+  const jsonLen = JSON.stringify(payload).length;
+  assert.ok(jsonLen < 20_000, `--json 也必须被截断，实际 ${jsonLen} 字节`);
+
+  const b1 = payload.blocks.find((b) => b.id === 'b1')!;
+  assert.equal(b1.severity, 'warning', '判定本身仍基于原文：只改了一行 ⇒ warning');
+  assert.equal(b1.dirty, false);
+  const long = b1.changes.find((c) => c.after_chars !== undefined);
+  assert.ok(long !== undefined, '超长变更点必须带上原始字符数');
+  assert.equal(long.after_chars, 300_000);
+  assert.ok((long.after ?? '').length < 1000, 'after 必须是截断后的预览');
+  assert.ok((long.after ?? '').endsWith('…'), '截断要以省略号收尾，便于人看');
+  assert.ok(b1.currentSource_chars !== undefined && b1.currentSource_chars > 300_000, 'currentSource 同样要如实给出原始长度');
+  assert.ok((b1.currentSource ?? '').length < 20_000, 'currentSource 必须是截断后的预览');
+});
