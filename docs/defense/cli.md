@@ -17,7 +17,7 @@
 - **`--repo` 是全局选项，放子命令前或后都行**：`parseArgs` 先做一趟无序扫描，把 `--xxx` 收进 `flags`、裸词收进 `positionals`，因此 `gmd --repo X read a.gmd` 与 `gmd read a.gmd --repo X` 等价。
 - **`--repo` 优先，否则从 cwd 向上找 `.git`**：找不到 ⇒ 退出码 5。**不用 `process.cwd()` 传给 git**（否则 `--repo` 形同虚设），所有 git 调用都带 `-C <repo>`。
 - **失败不污染 stdout**：`--json` 时 stdout 只放 `{"error","code"}`，人类可读文字全部走 stderr（`fail()` 统一处理）。这让 `gmd ... --json | jq` 永远安全。
-- **`read --version` 与 `--plain` 走独立分支**：`--version` 输出"该版本的来源与摘要信息"（不还原旧正文）；`--plain` 输出正文但**仍按 §4.9 规则返回退出码 3**（存在 error 块）。
+- **`read --version` 与 `--plain` 走独立分支**：`--version` 输出**该版本当时写下的正文 + 来源信息**（阶段 4·3 起 `hist[].text` 内嵌，见 `render.md`），并附 `active_severity`（该块**活动版本**的严重度）；两者可组合 —— `--plain --version <rev>` 只出该版正文。`--plain`（不带 `--version`）输出活动正文，但**仍按 §4.9 规则返回退出码 3**（存在 error 块）。
 - **`read --block <id>` 对两种输出形态**一视同仁**：`--json` 与冲突视图**共用同一个 `selected`**（`blockFlag` 命中则该块、否则全量）。曾出现的坑是"只有冲突视图收窄、`--json` 仍返回全部块"—— 而恰恰是 AI 用 `--json`，于是人和机器看到不同的块集合，属同一条命令自相矛盾。**注意退出码仍按整篇文档算**（存在 error 块 ⇒ 3），不因 `--block` 收窄而放宽，这样脚本据码分支时不会漏判文档整体状态。
 - **进程内可调用**：`runCli(argv, {cwd, stdin, io})` 把 `io` 作为参数注入 ⇒ 测试无需起子进程（本机 `spawnSync` EBUSY，进程内调用更稳），也让 demo 能直接复用。仅在"文件被当作入口直接运行"时才接 `process.argv`。
 - **`--path` / `--range` 在 `commit` 与 `log` 下语义不同、校验同一套**：`log --path --range` 是**查**来源提交历史（`--range` 不能单独用，会码 1）；`commit --path --range` 是**改**本版本的引用绑定（阶段 4·2，见 `commit.md`）。两者的取值校验共用 `isRepoRelativePath` / `parseRange`，所以"逃出仓库的 `--path`"和"`a>b` 的 `--range`"在两处都是**码 1**，不会出现同一参数两种结论。

@@ -181,6 +181,7 @@ export async function buildFixtureRepo(targetDir: string): Promise<FixtureInfo> 
     commit: sourceCommit,
     src_hash: hashRange(srcText, range),
     text_hash: textHash(text),
+    text, // 历史正文（阶段 4·3）：fixture 也要存，否则 `read --version 1` 取不到正文
   });
 
   const gmd = buildGmd(

@@ -155,7 +155,7 @@ PLAN §4 明确写"以下函数签名只是建议（属契约自由度）"。实
 
 **第二轮明确未做**（如实登记，答辩须能正面回答）：
 
-- **`read --version <rev>` 取不回历史正文**（题面参考接口把 `--version` 列在 `read` 下，用途是"取正文与严重度"；本实现只存 `text_hash`，故只回"该版本的来源与摘要信息"）。见 README §5.3 的自觉取舍。
+- ~~**`read --version <rev>` 取不回历史正文**~~ ⇒ **本轮已做**：`hist[].text` 内嵌每版正文，见 §8。
 - ~~**`error`（来源文件被删 / 引用范围消失）没有"重写后写回"的出路**~~ ⇒ **本轮已做**：`commit --path / --range` 重新绑定引用（详见 §7）。
 - **`--allow-dirty` 版本的 `commit`（HEAD）与 `src_hash`（脏工作区）不同源**，审计上不自洽（`note=based_on_dirty` 已标注语义）。
 - **`commit` 会重渲染所有块的元数据头，未知扩展字段被静默丢弃**（前向兼容隐患）。
@@ -183,4 +183,32 @@ PLAN §4 明确写"以下函数签名只是建议（属契约自由度）"。实
 
 **修复后全量复跑**：`--test` **36/36 通过**（33 + 新增 3）。
 
-> 未做项里还剩 4 条（历史正文、`--allow-dirty` 的 commit/src_hash 同源、未知字段保真、`read --plain` 对 error 块的正文口径），见 §6。
+> 未做项里还剩 3 条（`--allow-dirty` 的 commit/src_hash 同源、未知字段保真、`read --plain` 对 error 块的正文口径），见 §6。
+
+---
+
+## 8. 2026-10-11 第四轮：历史正文随版本落盘（阶段 4·3）
+
+修掉 §6 里"`read --version` 取不回历史正文"这条 —— 它是题面参考接口直接点名的一条（`gmd read <doc> [--version <id>]` 的用途写作"**取正文**与严重度"），也是题面开场"想追问为什么变了"的一半。原 PLAN §4.7 曾把它当作"格式设计上的自觉取舍"（只存 `text_hash`），本轮**改定**。
+
+| 改动 | 内容 |
+|---|---|
+| `src/types.ts` | `GmdVersion` 新增可选字段 **`text`**（该版本的正文） |
+| `src/format.ts` | 解析期校验：`text` 存在时必须是字符串，且 **`textHash(text) === text_hash`**，否则 `GmdFormatError`（**码 2** + 行号）。于是 `text_hash` 从"不可验证的承诺"变成**可验证的摘要** |
+| `src/commit.ts` | 新版本 `text = normalizeNewlines(newBody)`（与 `block.text`、`text_hash` 同源同值），历史版本各自的 `text` 原样保留 |
+| `src/cli.ts` + `src/render.ts` | `read --version <rev>` 给出**该版正文 + 来源**；`--plain --version` 只出该版正文；`--json` 行内 `text`（缺正文时**显式 `null`**）+ `active_severity`（活动版本严重度，明确标注以免被误读成 rev 的属性）；不窄化时其余块照常输出 |
+| `scripts/setup-fixtures.ts` | fixture 也带 `text`，演示与用例才有"真历史正文"可读 |
+| `src/render.ts` | `versionToJson` **刻意不含 `text`** —— `log --block --json` 是"查账"，塞进每版正文会让输出随历史膨胀且改变既有 key 形状（用例 19 有断言）。取正文走 `read --version`，"查账"与"取正文"分成两条命令 |
+
+**为什么不采用原稿预留的平行数组 `hist_text[]`**：`text` 必须与**它自己那条** `text_hash` 放在一起才可校验；平行数组一旦长度对不上就静默错位。已登记到 PLAN §4.7/§11。
+
+**代价（如实写进 README §5.3）**：每追加一版多存一份正文，文件随版本数线性膨胀 —— 这是"单文件自包含、不依赖旁车文件/索引/数据库"的必要开销。
+
+**证据**（§8 新增用例）：
+
+- 用例 **31**：rev1→rev2 后 `read --version 1 --block b1 --json/--plain/人读视图` ⇒ 取回 **rev1 当时写下的正文**（不是活动正文）；`active_severity` 标的是活动版本；不带 `note` 的版本不凭空多字段。
+- 用例 **32**：手改 `hist[0].text` ⇒ **码 2**；删掉 `text`（旧格式）⇒ 仍可 `read` 且 `ok`，`--json` 给 `text: null`、`--plain` stdout 为空 + stderr 点名，**码 0**。
+- 用例 **13** 同步加强：新版本带上自己的正文、**旧版本正文原样保留**（历史只追加）。
+- 既有用例 **19b / 30** 同步修正：它们用 `raw.replace(...)` 模拟"手改正文"，而同一个字符串现在也内嵌在块头 JSON 里 —— `replace` 会先命中**元数据**那一份，把文档变成"text 与 text_hash 不一致"的码 2，前置状态就不成立了。改用 `helpers.replaceBlockBody`（取**最后一次**出现 = 块正文）。
+
+**修复后全量复跑**：`--test` **38/38 通过**（36 + 新增 2）。

@@ -36,6 +36,7 @@ import {
   renderLogPath,
   renderPlainBody,
   renderReadView,
+  renderVersionView,
   shortHash,
   shortSha,
   toJson,
@@ -242,20 +243,44 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
           .map((b) => ({ block: b.id, version: b.hist.find((v) => v.rev === rev) ?? null }))
           .filter((r) => r.version !== null);
         if (rows.length === 0) return fail(EXIT.USAGE, `没有片段存在 rev ${rev}`);
+
+        // `--plain --version <rev>`：**只出该版本的历史正文**（题面参考接口"取正文"最直接的形态）。
+        // 旧格式文件可能没存正文 —— 那一条走 stderr 说明，不污染 stdout。
+        if (plain) {
+          const missing = rows.filter((r) => typeof r.version!.text !== 'string').map((r) => `${r.block} rev ${rev}`);
+          if (missing.length > 0) io.err(`※ 以下版本未存正文（旧格式文件）：${missing.join('、')}`);
+          io.out(
+            rows
+              .map((r) => (typeof r.version!.text === 'string' ? r.version!.text : ''))
+              .filter((t) => t.length > 0)
+              .join('\n\n'),
+          );
+          return EXIT.OK;
+        }
+
+        // 历史版本本身不谈严重度；参考接口里"正文与严重度"的严重度**始终是对活动版本的判断**，
+        // 所以这里单独查一次活动版本判定并用 `active_severity` 明确标注，避免被误读成 rev 的属性。
+        const activeSeverity = new Map((await judgeDoc(doc, repo)).map((j) => [j.id, j.severity]));
         if (wantJson) {
-          io.out(toJson(rows.map((r) => ({ block: r.block, ...versionToJson(r.version!) }))));
+          io.out(
+            toJson(
+              rows.map((r) => ({
+                block: r.block,
+                ...versionToJson(r.version!),
+                // 该命令的主产物就是这一版的正文：缺正文时**显式给 null**，不玩"字段消失"
+                text: typeof r.version!.text === 'string' ? r.version!.text : null,
+                active_severity: activeSeverity.get(r.block) ?? 'ok',
+              })),
+            ),
+          );
           return EXIT.OK;
         }
         io.out(
-          [
-            `# gmd read --version ${rev} — ${docRel}`,
-            '※ 本实现只保存**活动版本正文**，历史正文不保存（见 README「历史正文的取舍」）。',
-            '  下面给出的是该版本的来源与摘要信息，而不是当年的文档原文。',
-            ...rows.map(
-              (r) =>
-                `  ${r.block}  rev ${r.version!.rev}  ${r.version!.at}  ${r.version!.path}:${r.version!.range[0]}-${r.version!.range[1]}  ${shortSha(r.version!.commit)}  ${shortHash(r.version!.src_hash)}`,
-            ),
-          ].join('\n'),
+          renderVersionView(
+            docRel,
+            rev,
+            rows.map((r) => ({ block: r.block, version: r.version!, activeSeverity: activeSeverity.get(r.block) })),
+          ),
         );
         return EXIT.OK;
       }

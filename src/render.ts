@@ -141,6 +141,10 @@ export function toJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/**
+ * 版本元数据 → JSON。**不含 `text`**（历史正文）：`log --block --json` 是"查账"，把每一版的
+ * 正文都塞进去会让输出随历史线性膨胀；要取某一版的正文请用 `gmd read --version <rev>`。
+ */
 export function versionToJson(v: GmdVersion): Record<string, unknown> {
   const out: Record<string, unknown> = {
     rev: v.rev,
@@ -157,6 +161,38 @@ export function versionToJson(v: GmdVersion): Record<string, unknown> {
   // 用 `--json` 的 AI 就分辨不出这一版是不是脏来源产物。
   if (typeof v.note === 'string') out.note = v.note;
   return out;
+}
+
+export interface VersionRow {
+  block: string;
+  version: GmdVersion;
+  /** 该块**活动版本**的严重度：历史版本本身不谈严重度（三档只回答"现在还能不能直接用"）。 */
+  activeSeverity?: string;
+}
+
+/** `read --version <rev>` 的人类可读视图：**该版本的历史正文** + 来源信息 + 活动版本严重度。 */
+export function renderVersionView(docRel: string, rev: number, rows: VersionRow[]): string {
+  const lines: string[] = [
+    `# gmd read --version ${rev} — ${docRel}`,
+    '※ 下面是**该版本当时写下的正文**与它的来源信息。',
+    '※ 「该块当前严重度」针对的是**活动版本**（此刻还能不能直接用），不是 rev 的历史属性。',
+    '',
+  ];
+  for (const r of rows) {
+    const v = r.version;
+    lines.push(
+      `${r.block}  rev ${v.rev}  ${v.at}  ${v.path}:${v.range[0]}-${v.range[1]}  ${shortSha(v.commit)}  ${shortHash(v.src_hash)}`,
+    );
+    if (r.activeSeverity !== undefined) lines.push(`  该块当前严重度：${r.activeSeverity}`);
+    if (typeof v.text === 'string') {
+      lines.push('  正文：');
+      lines.push(...indentLines(v.text, '    | '));
+    } else {
+      lines.push('  正文：※ 该版本未存正文（旧格式文件；本实现写出的版本一律带 text）');
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
 }
 
 /** 给 `read --json` 用的块序列化（保留 §3.3 全部字段）。 */

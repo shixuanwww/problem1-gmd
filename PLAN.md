@@ -212,6 +212,7 @@ export interface GmdVersion {
   commit: string;           // 记录时的仓库 HEAD commit 全 sha（= git rev-parse HEAD，§4.6.2）
   src_hash: string;         // "sha256:<hex>" —— 该 range 内文本的摘要
   text_hash: string;        // "sha256:<hex>" —— 本片段正文（换行归一化为 \n 后 trim）的摘要
+  text?: string;            // 该版本的正文（阶段 4·3；本实现写出的版本一律带它，须与 text_hash 自洽）
   note?: string;            // 可选备注（序列化时须转义 "--"）
 }
 
@@ -310,7 +311,7 @@ export class GmdFormatError extends Error {
 ### 4.2 `blockView(block, version?): string` —— 取正文
 
 - 默认取**活动版本**（`hist` 最后一条）对应的 `text`。
-- 指定 `--version <rev>` 时，取该版本：⚠️ **`text` 只保存活动版本**，历史正文需从**来源**重建或从**历史快照**取 —— 见 §4.7 的取舍说明，**历史正文一律以"来源 + 该版本信息"呈现，不承诺还原当年的文档原文**。
+- 指定 `--version <rev>` 时，取该版本：**给出该版本当时写下的正文（`hist[].text`）+ 来源信息**；若给了 `--plain` 则**只出该版正文**。各块的 `active_severity` 是**活动版本**的严重度（历史版本本身不谈严重度，字段名已把它标注清楚）。旧格式文件缺 `text` 时：`--json` 给 `text: null`、人类可读视图与 `--plain` 在 stderr 说明"该版本未存正文"，**不因此改退出码**（见 §4.7）。
 
 ### 4.3 `judgeBlock(block, repo): BlockJudgement` —— 三档判定（**本题算法核心**）
 
@@ -499,23 +500,29 @@ export class GmdFormatError extends Error {
 通过后：
 
 1. 重新读取来源：`commit = git rev-parse HEAD`，`src_hash = hashRange(当前文件文本, range)`（§4.3 的唯一实现，**不得**另写一份），`range` **沿用它记录的旧范围**（阶段 1–3 不做符号级引用 —— 那是阶段 4）；
-2. `hist.push({ rev: last.rev + 1, at: now(), path, range, commit, src_hash, text_hash })`（`text_hash = textHash(新正文)`，§3.3）；
+2. `hist.push({ rev: last.rev + 1, at: now(), path, range, commit, src_hash, text_hash, text })`（`text_hash = textHash(新正文)`，§3.3；`text = normalizeNewlines(新正文)` —— 阶段 4·3 起**历史正文随版本落盘**，见 §4.7）；
 3. 用**新正文**（**已剥离草稿头**）就地替换该块正文，其余内容**逐字节保留**（换行按 §3.4 统一为 `\n`；仓库 LF 时等价）；
 4. 原子写：写 `.tmp` → `rename`（避免中途崩溃造成半截文件）；
 5. 输出新版本号（`--json` 给结构）。
 
 > 🔴 **`--allow-dirty`（阶段 4 选做）**：题面把"未提交来源的受控写回"列为阶段 4 进阶项之一。若实现，`--allow-dirty` 必须在**审计输出**里显著标注"此版本基于未提交来源"，并在新版本的 `note` 里写入 `based_on_dirty`。**不做也不算缺 —— 但命令要接受这个 flag 并给出明确提示。**（语义登记在 §11）
 
-### 4.7 历史正文的取舍（**必须在 README 说明**）
+### 4.7 历史正文：**随版本落盘**（阶段 4·3，2026-10-11 第三轮改定）
 
-`.gmd` 单文件自包含的代价：正文每改一次都要在文件里存一份，文件会线性膨胀。本实现的选择是：
+> **每个版本的正文内嵌在 `hist[i].text`。**
 
-> **只保存活动版本正文；`hist` 只保存"版本元数据"（来源、范围、commit、两个 hash）。**
+原稿（本 PLAN 早先版本）选择"只保存活动版本正文"，理由是"每改一次就在文件里存一份 ⇒ 线性膨胀"。第三轮复核后**改定**，因为那个取舍把题面要的东西弄丢了：
 
-- 因此 `gmd read --version <rev>` **不承诺还原当年的文档原文** —— 它给出的是**那个版本的来源与判定信息**（"当时是引用 `src/kv.ts:10-24@a1b2c3d`，正文摘要 `sha256:...`"）。
-- 若执行者想额外保留历史正文，可加一个可选的 `hist_text[]` 字段；**但必须写进 README，并说明它会让文件膨胀**（"默认不保存"的登记见 §11）。
+- 题面 §2.3 要求"文档标识、片段划分、**版本历史**、来源信息、Git 版本与时间**全部内嵌于 .gmd**"；§2.2 把"历史版本"定义为"**同一片段过去生成的版本**"。只留一个 `text_hash` ⇒ **正文其实没留**。
+- 题面参考接口把 `--version <id>` 列在 `read` 下、用途是"**取正文**与严重度"。只存 hash 时这条命令答不出"那一版到底写了什么"，正是题面开场 "想追问'为什么变了'" 的一半。
+- 额外收益：`text_hash` 从**不可验证的承诺**变成**可验证的摘要** —— 解析时校验 `textHash(text) === text_hash`（§4.1），手改历史正文会立刻暴露为格式损坏。
 
-> 🔑 这是**格式设计上的取舍**，也是"乐于看到更好的设计"的应景点：更好的方案可以只存 `text_hash` + 从来源重建，或做增量压缩。
+代价**如实写进 README**：每追加一版多存一份正文，文件随版本数线性膨胀。这是"单文件自包含、不依赖旁车文件/索引/数据库"（题面 §2.3）的必要开销；想优化就得做增量压缩或从来源重建，本实现选择先保证语义完整。
+
+字段形状：**`hist[i].text`（可选）**，而不是原稿预留的平行数组 `hist_text[]` —— 理由：`text` 与它自己的 `text_hash` 放在同一条版本记录里才**可校验**，平行数组一旦长度对不上就会静默错位（本轮把这条"替代方案"登记在 §11）。
+
+- 本实现**写出的版本一律带 `text`**；旧格式 / 手写骨架可以没有，此时那一版只取不到正文（`read --version --json` 给 `text: null`，人类可读视图与 `--plain` 在 stderr 说明，**不改退出码**）。
+- `read --version <rev>` 输出该版**正文 + 来源信息**；各块的 `active_severity` 是**活动版本**的严重度（历史版本不谈严重度）；`--plain --version <rev>` 只出该版正文。
 
 ### 4.8 `gmd log` 的输出
 
@@ -555,7 +562,7 @@ export class GmdFormatError extends Error {
 | 命令 | JSON 形状 |
 |---|---|
 | `read --json` | `{"doc": GmdDoc, "blocks": BlockJudgement[]}` —— `blocks` 顺序 = 文件内块顺序；每个元素即 §3.3 的 `BlockJudgement`（`source` / `reason` / `dirty` / `writable` / `changes` / `currentSource` 全部保留） |
-| `log --json` | **数组**：`--block` → `[{rev, at, path, range, commit, src_hash, text_hash}]`；`--path`（+`--range`）→ `[{sha, short, at, subject}]`；无参数 → `[{id, rev, severity, path, range}]` |
+| `log --json` | **数组**：`--block` → `[{rev, at, path, range, commit, src_hash, text_hash}]`（⚠️ **刻意不含 `text`**：`log` 是"查账"，把每版正文都塞进来会让输出随历史线性膨胀；要取某版正文用 `read --version <rev> --json`，见 §4.7）；`--path`（+`--range`）→ `[{sha, short, at, subject}]`；无参数 → `[{id, rev, severity, path, range}]` |
 | `commit --json` | `{"block": string, "rev": number, "text_hash": string, "range": [number, number]}` |
 | `edit --json` | `{"draft_path": string}`（绝对路径） |
 
@@ -726,6 +733,8 @@ node --experimental-strip-types --test tests/*.test.ts
 | **28**（阶段 4·2，本轮新增） | `error` 档闭环：删掉 `src/kv.ts`（已提交）⇒ b1 `error("引用文件不存在")`，再 `commit --block b1 --path src/conf.ts --range 9..13 --input -` 重写正文 | 写回成功、`rev+1`；新版本 `path=src/conf.ts`/`range=[9,13]`；`read` 回到 `ok`；`log --block b1` 里 **rev1 仍记着旧 `src/kv.ts`/`[10,24]`**（历史只追加、旧绑定不被改写）；`b2` 仍是 error（片段级独立） |
 | **29**（阶段 4·2 边界，本轮新增） | 重绑定的四类边界：`--range 5..2` / `--range 0..3` / `--path ../outside.ts` / `--path src/nope.ts` / `--range 9..999` / **新来源脏**（改 `src/conf.ts` 不提交） | 前三者**码 1**（参数错）；不存在与越界**码 4**；新来源脏**码 4**（`/未提交修改/`）；`.gmd` 全程逐字节不变、`rev` 仍为 1 |
 | **30**（回归·闸门漏洞，本轮新增） | **手改正文**让 b1 本身变成 `error`，同时来源范围有未提交修改 ⇒ `commit --input -` | **码 4**（`/未提交修改/`）、文件逐字节不变。**修复前** `commit` 取 `judgeBlock(...).dirty`，而该函数在步骤 0 场景返回 `dirty=false` ⇒ "先把正文手改坏再 commit"能绕过脏来源闸门，违反"引用范围内有未提交修改 ⇒ 不允许写回" |
+| **31**（阶段 4·3，本轮新增） | 造出 rev1→rev2 后：`read --version 1 --block b1 --json` / `--plain` / 人读视图；再取 rev2 | `text` = **rev1 当时写下的正文**（不得拿活动正文冒充）；`active_severity` 标注的是活动版本（rev2 已 `ok`）；`--plain --version 1` 只出该版正文、不混进 rev2 内容；不带 `note` 的版本不凭空多出该字段 |
+| **32**（阶段 4·3 边界，本轮新增） | ① 手改 `hist[0].text` 但不改 `text_hash`；② 删掉 `text` 字段（模拟旧格式 / 手写骨架） | ① **码 2**（"text 与 text_hash 不一致"+行号）；② 仍能 `read` 且 `ok`，`read --version 1 --json` 给 `text: null`、`--version 1 --block b1 --plain` 的 stdout 为空 + stderr 说明"未存正文"（**不改退出码**）；不给 `--block` 时其余块的正文照常输出 |
 
 > 🔴 **用例 0 不是"随便跑一下"，是 3/5/7/13/16 的**前置条件**：演示与测试里每一次"改源文件"之后，都必须**显式提交**（见 §9.2 / §9.3 的注解），否则 dirty 短路让这些用例断言失败。**全文唯一允许不提交源改动的地方是用例 6、用例 14 与用例 23**（23 只改换行字节：CRLF 工作区 vs LF HEAD，属"换行不构成 dirty"）。**
 
@@ -823,7 +832,7 @@ node --experimental-strip-types demo/warning-loop.ts         # 阶段 3：无人
 | 行号漂移搜索窗口 | `range ± 50` 行 |
 | `changes` 上限 | 20 条，超出截断 |
 | 缓存 | **不做**（题面说"可生成"，非必需） |
-| 历史正文 | **不保存**，只存版本元数据（§4.7）；`read --version` 给版本信息而非旧原文 |
+| 历史正文 | **保存**：`hist[i].text`（可选字段，本实现写出的版本一律带；与 `text_hash` 必须自洽，见 §4.1 校验）。`read --version <rev>` 取回该版正文；缺 `text` 的旧格式给 `text: null` + stderr 说明（§4.7 / §4.9 / §8 用例 31、32）。原稿预留的平行数组 `hist_text[]` **不采用**（同一版本记录内才可校验） |
 | 草稿目录 | `<repo>/.gmd/tmp/`（可删；判定从不读它） |
 | 未提交修改的判定粒度 | **仅比较 `v.range` 范围内**（题面："判断只看被引用的范围"）；函数是 `isRangeDirty(path, range)`，**不是**整文件级 `isDirty(path)`。**实现口径写死**：`isRangeDirty(path, range) := hashRange(当前文件文本, range) !== hashRange(git show HEAD:<path> 的文本, range)` —— 两边**必须先经同一个 `hashRange`**（内部 `normalizeEol`：`split(/\r\n|\r|\n/)` 后再以 `'\n'` 连接）归一化后再比；**禁止**直接比较原文、行数组（`nowLines` / `headLines` 只可用于行数 / 相似度 / 展示）或用第二套切分口径 —— **换行差异不构成 dirty**（CRLF 工作区 vs LF HEAD 判 equal），否则全块永久 `warning` + `writable = false`（§4.3 步骤 2/3、§8 用例 23） |
 | 文件重命名 | **不做跟踪**（按"文件不存在"判 error）；写进 README 的"未实现" |
@@ -835,7 +844,7 @@ node --experimental-strip-types demo/warning-loop.ts         # 阶段 3：无人
 | fixture 的排除与复现 | **整目录排除 `fixtures/repo/`**（其源文件与 `.git` **一律不入库** —— 避免与脚本悄悄漂移、避免被父库记成 gitlink）与 `.gmd/tmp/`；`scripts/setup-fixtures.ts` **第一件事是 `rm -rf fixtures/repo` 再重建**，每次 `git commit` 注入固定 **`GIT_AUTHOR_DATE` / `GIT_COMMITTER_DATE`**（另加 `-c core.autocrlf=false`），保证重跑后 commit sha 一致（§7 / §8 用例 0 / 附二1） |
 | 判定依据 | **工作区（worktree）当前内容**，不是 `HEAD`（题面"基于读取时的真实仓库状态判断，不用陈旧缓存"；§2 / §4.3） |
 | 来源文件编码 | 读取来源一律按 **UTF-8** 解码（`TextDecoder('utf-8', {fatal:true})`）；**非 UTF-8** 或**二进制**（含 NUL 字节）→ **明确报错**（该块记 `error("来源不是 UTF-8 文本: <path>")`，其它块继续判），**不静默降级、不用替换字符**（§4.1 / §4.4） |
-| `--json` 输出结构 | **单行合法 JSON**（`JSON.parse` 必成功）：`read` → `{doc, blocks}`；`log` → **数组**（`--block` → `[{rev, at, path, range, commit, src_hash, text_hash}]`；`--path`（+`--range`）→ `[{sha, short, at, subject}]`；无参数 → `[{id, rev, severity, path, range}]`）；`commit` → `{block, rev, text_hash, range}`；`edit` → `{draft_path}`（绝对路径）；失败 → `{error, code}`（与退出码同号，人类可读文字走 stderr）；未列入的命令**不承诺**有 `--json`（§4.9 / §8 用例 19） |
+| `--json` 输出结构 | **单行合法 JSON**（`JSON.parse` 必成功）：`read` → `{doc, blocks}`；`read --version <rev>` → **数组** `[{block, rev, at, path, range, commit, src_hash, text_hash, text, active_severity}]`（`text` 缺正文时 **`null`**）；`log` → **数组**（`--block` → `[{rev, at, path, range, commit, src_hash, text_hash}]`（**不含 `text`**）；`--path`（+`--range`）→ `[{sha, short, at, subject}]`；无参数 → `[{id, rev, severity, path, range}]`）；`commit` → `{block, rev, text_hash, range}`（`--path` 重绑定时**追加** `path`）；`edit` → `{draft_path}`（绝对路径）；失败 → `{error, code}`（与退出码同号，人类可读文字走 stderr）；未列入的命令**不承诺**有 `--json`（§4.9 / §8 用例 19） |
 | `read` 的"只出正文"开关 | **`--plain`**（别名 `--body`，`read` 专用）：只打印块正文，不带严重度 / 变更点 / 建议命令；缺 `--block` 时按块顺序输出、空行分隔；**与 `--json` 互斥**（同时给 → 参数错，码 1）；退出码仍按 §4.9 表（存在 error 块时 `read` 仍返回 3）。题面依据：§1.6"默认冲突视图，**可切换为只出正文**"（§4.9 / §8 用例 19d） |
 | git 子进程 | 一律 **`git -C <repo>`**（不得依赖 `process.cwd()`，否则 `--repo` 形同虚设）且**必须带 15s 超时**；启动时 `git --version` 探测一次，失败 → **明确报错**而非静默降级（§2.1 / §5 阶段 1） |
 | `log --range` 的边界与降级 | `a > b` 或 `a < 1` → 参数错**码 1**；`b > 当前文件行数` → **不调用** `git log -L`，降级为"列出该文件全部提交并标注 `range 超出当前文件行数`"；**任何** git 非零退出（含 128、超时、`-L` 在重命名 / 合并历史上报错）→ 一律**码 5**（打印 stderr 首行），**不得**当成"没有提交"或静默吞掉；`git show v.commit:<path>` 取不到 → 该块 `error("无法回溯来源版本")`（§4.8 / §4.3 步骤 6） |
@@ -843,7 +852,7 @@ node --experimental-strip-types demo/warning-loop.ts         # 阶段 3：无人
 | 草稿文件命名 | `<repo>/.gmd/tmp/<doc 相对路径的分隔符→下划线>-<sha256(文档绝对路径) 前 8 位>-<block>.draft.md`；目标已存在则**覆盖**并打印 `覆盖已有草稿: <path>`（**不**静默追加编号）；规则写进 README（§4.6.1） |
 | `--allow-dirty` 语义（阶段 4 选做） | 若实现：**审计输出显著标注"此版本基于未提交来源"**，新版本 `note` 写入 `based_on_dirty`；**不做也须接受该 flag 并给出明确提示**（§4.6.2） |
 | 从零建文档 | **不提供 `gmd new` 子命令**（题面参考接口只有 `read`/`log`/`edit`/`commit`）；按 §3.1 **手写** `gmd:doc` / `gmd:block` 骨架，`hist[0]` 的 `src_hash` 用 `hashRange` 实测；README"快速开始"必须给出可复制的最小骨架（§5 阶段 3） |
-| 历史正文（可选扩展） | 默认**不保存**；若执行者要保留，可加可选字段 `hist_text[]`，但**必须写进 README 并说明它会让文件线性膨胀**（§4.7） |
+| 历史正文（阶段 4·3，已实现） | 字段为 `hist[i].text`（**不是**原稿预留的 `hist_text[]` —— 见 §4.7 的理由）；解析时校验 `textHash(text) === text_hash`，否则**码 2**；`read --version --json` 缺正文时给 `text: null`、`--plain` 走 stderr 说明且**不改退出码**；README 已如实说明"文件随版本数线性膨胀"（§4.7 / §8 用例 31、32） |
 | 语言 / 运行环境 | **TypeScript + Node**（零第三方依赖，唯一外部程序是 `git`）；**Node ≥ 22.6（建议 ≥ 22.18）** + `node --experimental-strip-types`；相对 import 必须带 `.ts` 后缀；禁用 `enum` / `namespace` / 装饰器 / 构造函数参数属性 / `tsconfig paths` 别名（§0 第 2 条 / §2 / §2.1） |
 | 元数据编码 | 注释内 **JSON**：解析允许跨多行，**序列化输出为紧凑单行**（§2 / §3.4） |
 | 分隔符安全 | 序列化 JSON 时把 `--` 转义为 `\u002d\u002d`（只处理 JSON 字面量，不动正文）；解析时若注释提前闭合 → 视为格式损坏（§2 / §3.1 / §3.4） |

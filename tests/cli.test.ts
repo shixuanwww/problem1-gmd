@@ -90,7 +90,7 @@ test('用例 19d：read --plain 只出正文；与 --json 互斥（退出码 1�
   assert.equal(conflict.code, 1, '--plain 与 --json 必须互斥');
 });
 
-test('用例 19 补：日志的三种参数组合都能落地，read --version 给出该版本来源信息', async () => {
+test('用例 19 补：日志的三种参数组合都能落地，read --version 给出该版本来源信息与历史正文', async () => {
   const { repo } = await freshRepo();
 
   const blockLog = await cli(['log', 'docs/api.gmd', '--block', 'b2', '--repo', repo]);
@@ -106,7 +106,9 @@ test('用例 19 补：日志的三种参数组合都能落地，read --version �
   const version = await cli(['read', 'docs/api.gmd', '--version', '1', '--repo', repo]);
   assert.equal(version.code, 0);
   assert.match(version.out, /src\/kv\.ts:10-24/);
-  assert.match(version.out, /历史正文不保存/);
+  // 阶段 4·3 起：历史正文随 hist[].text 内嵌，--version 必须能取回它（不再是"只回元信息"）
+  assert.match(version.out, /## `get\(key\): Promise<Buffer \| null>`/, '必须给出 rev1 的正文');
+  assert.doesNotMatch(version.out, /历史正文不保存/);
 });
 
 test('回归：read --block <id> --json 必须只返回该块（与冲突视图口径一致）', async () => {

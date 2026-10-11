@@ -65,6 +65,7 @@ block     := "<!-- gmd:block " <JSON> "-->" 正文 "<!-- /gmd:block -->"
 | | `commit` | 记录时的仓库 HEAD 全 sha |
 | | `src_hash` | `range` 内文本的摘要（`sha256:<hex>`） |
 | | `text_hash` | 本片段正文（换行归一化后 `trim`）的摘要 |
+| | `text` | **该版本的正文**（阶段 4·3）。本实现写出的版本**一律带它**，于是 `gmd read --version <rev>` 能取回"那一版写了什么"，`text_hash` 也从"不可验证的承诺"变成**可验证的摘要**（解析时校验二者一致，不一致即码 2）。代价是每追加一版多存一份正文（见 §5.3）；旧格式文件可缺此字段，那一版只取不到正文 |
 | | `note` | 可选备注（如 `based_on_dirty`） |
 
 ### 2.3 格式示意（`docs/example.gmd`，与 PLAN §3.2 逐字一致）
@@ -90,6 +91,7 @@ block     := "<!-- gmd:block " <JSON> "-->" 正文 "<!-- /gmd:block -->"
 ```
 
 > ⚠️ `docs/example.gmd` 是**格式示意**：它的 `src_hash` / `text_hash` 是**示意值**（与正文对不上），所以两个块会被判 `error`「正文与元数据不一致」—— 这是**刻意**的。但它**格式本身合法、必须能通过严格解析**：`gmd read docs/example.gmd` 应返回 **3**（存在 error 块），**不应**返回 **2**（格式损坏）。
+> 这份示意里**故意没有 `hist[].text`** —— 正因为它的 `text_hash` 是示意值，一旦补上 `text` 就会命中"`text` 与 `text_hash` 不一致"的自洽校验而变成**码 2**。所以它同时也是"旧格式 / 手写骨架（无历史正文）"的样例：`read --version 1` 会明确告诉你要的那一版**未存正文**。
 > 想看一个**可被真实判定为 `ok`** 的文档，请先跑 `scripts/setup-fixtures.ts`，再 `gmd read docs/api.gmd --repo fixtures/repo`。
 
 ### 2.4 单文件自包含 / 侧车文件说明（PLAN 附二 2）
@@ -170,6 +172,7 @@ gmd commit <doc> --block <id> [--input <file|->] [--allow-dirty] [--path <src>] 
 | 命令 | 形状 |
 |---|---|
 | `read --json` | `{"doc": GmdDoc, "blocks": BlockJudgement[]}`（字段与 §3 判定结构一一对应；**给 `--block` 时 `blocks` 只含该块**，与冲突视图口径一致；退出码仍按整篇文档算） |
+| `read --version <rev> --json` | **数组**（每个块一行）：`{block, rev, at, path, range, commit, src_hash, text_hash, text, active_severity}` —— `text` = **该版本当时写下的正文**（未存时**显式 `null`**）；`active_severity` = 该块**活动版本**的严重度（历史版本本身不谈严重度，标注在名字里免得被误读成 rev 的属性） |
 | `log --json` | `--block` → `[{rev,at,path,range,commit,src_hash,text_hash}]`（版本带 `note` 时**追加**一个 `note` 字段，见下）；`--path`(+`--range`) → `[{sha,short,at,subject}]`；无参数 → `[{id,rev,severity,path,range}]` |
 | `commit --json` | `{"block","rev","text_hash","range"}`（`--path` 重新绑定时**追加** `path`，见 §4.2 注 3） |
 | `edit --json` | `{"draft_path"}`（绝对路径） |
@@ -183,6 +186,8 @@ gmd commit <doc> --block <id> [--input <file|->] [--allow-dirty] [--path <src>] 
 ### 4.3 `--plain`（别名 `--body`）—— 只出正文
 
 题面"默认冲突视图，**可切换为只出正文**"。`--plain` 只打印块正文：给 `--block` 出该块，缺省按块顺序、空行分隔；**与 `--json` 互斥**（同时给 → 参数错，码 1）。存在 `error` 块时退出码仍为 3。
+
+`--plain` 也可以和 `--version <rev>` 组合：**只出那一版的历史正文**（题面参考接口"取正文"最直接的形态）。若该版本是旧格式文件、没存正文，stdout 不输出内容、stderr 明确说明是哪一版缺正文 —— 取不到正文不是错误，**不用退出码惩罚调用方**。
 
 ### 4.4 `gmd edit` / `gmd commit`（阶段 3：改得回）
 
@@ -219,7 +224,8 @@ gmd commit docs/api.gmd --block b1 --path src/conf.ts --range 9..13 --input new-
 
 1. **为什么用 HTML 注释承载元数据？** 标准 Markdown 渲染器**完全忽略 HTML 注释** ⇒ 普通 Markdown 阅读体验毫发无损；同时它是纯文本、可 diff、可手改、无需引 YAML/JSON-Schema 依赖。代价是注释内**不允许裸 `--`**，故序列化时把 JSON 里的 `--` 转义为 `\u002d\u002d`（只动 JSON 字面量，不动正文）。
 2. **为什么用"行集合相似度"而不是 git diff？** diff 需要把"旧文本"与"新文本"按位置对齐，而 `range` 是**绝对行号**：文件中间插一行就会让整个 diff 错位、把正常改动误判成"整段替换"。**行集合相似度对行号漂移天然免疫**，实现简单、结果确定。短引用（≤2 行）下行集合必然退化，故**改用字符集合 Jaccard**（见 §3.1）。
-3. **为什么只保存活动版本正文？** 单文件自包含的代价是"每改一次正文就在文件里存一份 ⇒ 线性膨胀"。本实现只存**版本元数据**（来源、范围、commit、两个 hash），正文仅存活动版本。因此 `gmd read --version <rev>` 给出的是**那个版本的来源与判定信息**，**不承诺还原当年的文档原文** —— 这是格式设计上的自觉取舍（更优方案可从来源重建或做增量压缩）。
+3. **为什么保存每一版的正文（`hist[].text`，阶段 4·3）？** 题面 §2.3 要求"版本历史……全部内嵌于 .gmd"、§2.2 把"历史版本"定义为"同一片段过去生成的版本"—— 只留 `text_hash` 等于**正文没留**：`read --version <rev>` 答不出"那一版到底写了什么"，"想追问为什么变了"也就少了一半。存了之后还有一个额外好处：`text_hash` 从**不可验证的承诺**变成**可验证的摘要**（解析时校验 `textHash(text) === text_hash`，不一致直接判码 2）。
+   代价是**真实的**：每追加一版就多存一份正文，文件随版本数线性膨胀。这是"单文件自包含"的必要开销（题面明确要求不依赖旁车文件/索引/数据库）。真要优化，可做增量压缩或从来源重建 —— 本实现选择**先保证语义完整、把代价写清楚**（§6 亦如实登记）。
 4. **为什么 dirty 只按 `v.range` 判、且换行不算脏？** 题面"判断只看被引用的范围"。若整文件级判脏、或不做换行归一化，则 `core.autocrlf=true` 的机器上工作区是 CRLF、`git show HEAD:` 给的是 LF，会把**所有块**永久判成 `warning + 不可写回`。
 
 ---
@@ -233,6 +239,7 @@ gmd commit docs/api.gmd --block b1 --path src/conf.ts --range 9..13 --input new-
 - CLI：`read`（冲突视图 / `--plain` / `--json` / `--version`）、`log`（片段历史 / 来源提交历史 / `--range` 过滤与降级）、`edit`（草稿）、`commit`（草稿头剥离 + 五道校验 + 原子写 + 追加版本）
 - `--allow-dirty` 受控写回（阶段 4·1，`note=based_on_dirty` + 审计标注）
 - `commit --path / --range` **重新绑定引用**（阶段 4·2）：`error` 档"重写后把引用改指到仍存在的来源"⇒ 闭环打通；新来源照样过存在性 / 越界 / dirty 三道闸，历史版本各自的 `path`/`range` 不被改写
+- **每一版的正文内嵌**（阶段 4·3，`hist[].text`）：`read --version <rev>` 取回"那一版写了什么"（`--plain --version` 只出该版正文）；`text_hash` 变成可验证的摘要
 - 退出码 0–5；`--json` 契约；`--repo` 定位；git 子进程 15s 超时 + `-C` 指定仓库
 
 **未实现**（如实声明，未做不算缺）
@@ -241,7 +248,7 @@ gmd commit docs/api.gmd --block b1 --path src/conf.ts --range 9..13 --input new-
 - **不做缓存**（题面"可生成"是可选；不做 = 每次真读仓库，天然满足"不用陈旧缓存"）。
 - **不做文件重命名跟踪**（重命名按"文件不存在"判 `error`，诚实且正确）。
 - **不做符号 / 选区级引用**（阶段 4 项；`commit` 缺省沿用旧 `range`，需改指时用 `--path` / `--range` 显式重绑定，见 §4.6）。
-- **不保存历史正文**（`hist_text[]` 未做，见 §5.3）。
+- **不做历史正文的压缩 / 去重**：每版正文原样内嵌（§5.3 已说明这是"单文件自包含"的必要开销；`hist[].text` 的**可选**性留给了不用历史正文的调用方 —— 旧格式文件缺该字段仍可读）。
 - **不做分支 / 祖先判断**（阶段 4 项；未判"来源来自其它分支"）。
 - **不做 MCP / Agent 集成**（阶段 4 项）。
 - **不做 Markdown AST 解析**（题面明确不要求）。

@@ -122,3 +122,37 @@ export function blockOf(payload: unknown, id: string): BlockJson {
 export function outsideText(raw: string): string {
   return raw.replace(/<!--\s*gmd:block\b[\s\S]*?<!--\s*\/gmd:block\s*-->/g, '');
 }
+
+/**
+ * 把 `.gmd` 里**块正文**中的某段文字换成新文字（用例里模拟"手改正文但不追加版本"）。
+ *
+ * ⚠️ 不能直接 `raw.replace(from, to)`：从阶段 4·3 起，每个版本的正文也内嵌在**块头 JSON** 的
+ * `hist[].text` 里，而块头排在块正文之前 ⇒ `replace` 会先命中**元数据**那一份，把文档变成
+ * "text 与 text_hash 不一致"的格式损坏，用例的前置状态就不成立了。
+ * 块正文永远排在它所属的块头之后 ⇒ 取**最后一次**出现。
+ */
+export function replaceBlockBody(raw: string, from: string, to: string): string {
+  const at = raw.lastIndexOf(from);
+  if (at < 0) throw new Error(`块正文里找不到要替换的文字：${from}`);
+  return raw.slice(0, at) + to + raw.slice(at + from.length);
+}
+
+/**
+ * 精修某个块的**块头元数据**（用例要造"手改 text / 删掉 text 字段"这类场景时用）。
+ * 块头是单行注释：解析出 JSON → 交给 `mutate` 改 → 重新序列化回那一行。
+ */
+export function editBlockHead(
+  raw: string,
+  blockId: string,
+  mutate: (head: Record<string, unknown>) => void,
+): string {
+  const lines = raw.split('\n');
+  const idx = lines.findIndex((l) => l.startsWith(`<!-- gmd:block {"id":"${blockId}"`));
+  if (idx < 0) throw new Error(`找不到片段 ${blockId} 的块头`);
+  const json = lines[idx].slice('<!-- gmd:block '.length, -' -->'.length);
+  // 序列化时 JSON 里的 `--` 被转义成 \u002d\u002d（见 format.ts 的 escapeDashes），还原后才能 parse
+  const head = JSON.parse(json.split('\\u002d\\u002d').join('--')) as Record<string, unknown>;
+  mutate(head);
+  lines[idx] = `<!-- gmd:block ${JSON.stringify(head)} -->`;
+  return lines.join('\n');
+}

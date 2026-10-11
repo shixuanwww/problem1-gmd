@@ -11,7 +11,7 @@ import { GmdFormatError } from './types.ts';
 import type { GmdBlock, GmdDoc, GmdVersion, ParsedGmd } from './types.ts';
 // 🔒 路径纪律与 gitrepo 共用**同一份**判定（仓库纪律：一个口径只有一份实现），
 // 不在这里另抄一遍。见 gitrepo.ts 的 isRepoRelativePath / resolveInRepo。
-import { isRepoRelativePath } from './gitrepo.ts';
+import { isRepoRelativePath, textHash } from './gitrepo.ts';
 
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const HASH_RE = /^sha256:[0-9a-f]{64}$/;
@@ -186,10 +186,24 @@ function validateVersion(raw: unknown, index: number, line: number): GmdVersion 
   if (typeof text_hash !== 'string' || !HASH_RE.test(text_hash)) {
     throw new GmdFormatError(`${where}.text_hash 必须是 "sha256:<64 位小写 hex>"`, line);
   }
+  // 历史正文（可选）：写出的版本一律带；旧格式文件没有也合法。
+  // 🔒 带它就必须自洽 —— 这是 `text_hash` 从"不可验证的承诺"变成"可验证摘要"的关键：
+  // 否则一份手改过 hist[].text 的文档能一路读到 `read --version` 才暴露。
+  let text: string | undefined;
+  if (v.text !== undefined) {
+    if (typeof v.text !== 'string') {
+      throw new GmdFormatError(`${where}.text 若存在必须是字符串`, line);
+    }
+    if (textHash(v.text) !== text_hash) {
+      throw new GmdFormatError(`${where}.text 与 ${where}.text_hash 不一致（历史正文必须自洽）`, line);
+    }
+    text = v.text;
+  }
   if (note !== undefined && typeof note !== 'string') {
     throw new GmdFormatError(`${where}.note 若存在必须是字符串`, line);
   }
   const out: GmdVersion = { rev, at, path, range: [l0, l1], commit, src_hash, text_hash };
+  if (typeof text === 'string') out.text = text;
   if (typeof note === 'string') out.note = note;
   return out;
 }

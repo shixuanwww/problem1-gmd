@@ -9,7 +9,19 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { CONF_TS, KV_TS, commitAll } from '../scripts/setup-fixtures.ts';
-import { blockOf, cli, docPath, freshRepo, outsideText, parseJson, readText, srcPath, writeText } from './helpers.ts';
+import { parseGmd } from '../src/format.ts';
+import {
+  blockOf,
+  cli,
+  docPath,
+  freshRepo,
+  outsideText,
+  parseJson,
+  readText,
+  replaceBlockBody,
+  srcPath,
+  writeText,
+} from './helpers.ts';
 
 const D = '2026-08-01T00:00:00Z';
 const D2 = '2026-08-02T00:00:00Z';
@@ -40,6 +52,7 @@ async function prepareWarning(repo: string): Promise<void> {
 
 test('用例 13：edit → 重写 → commit → rev+1 追加，且旧版本仍在 hist 里', async () => {
   const { repo } = await freshRepo();
+  const rev1Body = parseGmd(readText(docPath(repo))).blocks.find((b) => b.id === 'b1')!.text;
   await prepareWarning(repo);
 
   const draft = await makeDraft(repo, 'b1');
@@ -65,7 +78,14 @@ test('用例 13：edit → 重写 → commit → rev+1 追加，且旧版本仍�
 
   const raw = readText(docPath(repo));
   assert.doesNotMatch(raw, /gmd:draft/, '草稿头绝不能进入 .gmd 正文');
-  assert.equal(raw.split('按键取值；命中缓存则返回副本。').length - 1, 1, '新正文只应出现一次');
+  // 活动正文必须是新正文（阶段 4·3 起，新正文还会作为 rev2 的 hist[].text 再出现一次，
+  // 所以不能再用"整文件里出现几次"来断言）。
+  const parsed = parseGmd(raw);
+  const b1Block = parsed.blocks.find((b) => b.id === 'b1')!;
+  assert.equal(b1Block.text.trim(), NEW_BODY.trim(), '活动正文必须就是新正文');
+  assert.equal(b1Block.hist.length, 2, 'hist 只追加');
+  assert.equal(b1Block.hist[1].text?.trim(), NEW_BODY.trim(), '新版本必须带上自己的正文');
+  assert.equal(b1Block.hist[0].text, rev1Body, '旧版本的正文必须原样保留（历史只追加）');
 });
 
 test('用例 14：来源有未提交修改且未加 --allow-dirty → 拒绝（码 4），文件字节不变', async () => {
@@ -339,7 +359,8 @@ test('用例 30：手改正文（块变 error）不得绕过脏来源闸门', as
   writeText(srcPath(repo), lines.join('\n')); // 未提交 ⇒ 范围脏
 
   const raw = readText(docPath(repo));
-  writeText(docPath(repo), raw.replace('按键取值。键不存在时返回 `null`，**不抛异常**。', '手改的正文（没有追加版本）'));
+  // ⚠️ 只改**块正文**那一份（同一字符串也内嵌在块头 JSON 的 hist[0].text 里，见阶段 4·3）
+  writeText(docPath(repo), replaceBlockBody(raw, '按键取值。键不存在时返回 `null`，**不抛异常**。', '手改的正文（没有追加版本）'));
   const broken = blockOf(parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out), 'b1');
   assert.equal(broken.severity, 'error', '前置：手改正文 ⇒ 步骤 0 error');
   assert.equal(broken.dirty, false, '判定引擎此时不报 dirty（正是漏洞的入口）');
@@ -351,4 +372,50 @@ test('用例 30：手改正文（块变 error）不得绕过脏来源闸门', as
   assert.equal(res.code, 4, '来源范围脏 ⇒ 即便块本身是 error 也必须拒写');
   assert.match(res.err, /未提交修改/);
   assert.equal(readText(docPath(repo)), before, '被拒时文件必须逐字节不变');
+});
+
+/**
+ * 用例 31（阶段 4·3）：`read --version <rev>` **取回该版本的历史正文**。
+ *
+ * 题面参考接口把 `--version <id>` 列在 `read` 下、用途是"取正文与严重度"。只存 `text_hash`
+ * 时这条命令只能回元信息（"那一版写了什么"答不出来）。现在每版正文随 `hist[].text` 内嵌，
+ * 于是：`--json` 给 `text`（缺正文时显式 `null`）、`--plain` 只出该版正文。
+ */
+test('用例 31：read --version 取回历史正文（--json / --plain），且不改写旧版本', async () => {
+  const { repo } = await freshRepo();
+  const rev1Body = parseGmd(readText(docPath(repo))).blocks.find((b) => b.id === 'b1')!.text;
+  await prepareWarning(repo);
+  const draft = await makeDraft(repo, 'b1');
+  replaceDraftBody(draft, NEW_BODY);
+  assert.equal((await cli(['commit', 'docs/api.gmd', '--block', 'b1', '--repo', repo, '--input', draft])).code, 0);
+
+  // rev1：正文 = 旧正文
+  const v1 = parseJson(
+    (await cli(['read', 'docs/api.gmd', '--block', 'b1', '--version', '1', '--json', '--repo', repo])).out,
+  ) as Array<{ block: string; rev: number; text: string | null; active_severity: string; note?: string }>;
+  assert.equal(v1.length, 1);
+  assert.equal(v1[0].block, 'b1');
+  assert.equal(v1[0].rev, 1);
+  assert.equal(v1[0].text, rev1Body, '必须取回 rev1 当时写下的正文');
+  assert.notEqual(v1[0].text, NEW_BODY, '不能拿活动正文冒充历史正文');
+  assert.equal(v1[0].active_severity, 'ok', '严重度标注的是活动版本（rev2 已 ok）');
+  assert.equal('note' in v1[0], false, '无 note 的版本不应凭空多出该字段');
+
+  // rev2：正文 = 新正文
+  const v2 = parseJson(
+    (await cli(['read', 'docs/api.gmd', '--block', 'b1', '--version', '2', '--json', '--repo', repo])).out,
+  ) as Array<{ text: string | null }>;
+  assert.equal(v2[0].text, NEW_BODY);
+
+  // --plain --version：只出该版正文
+  const plain1 = await cli(['read', 'docs/api.gmd', '--block', 'b1', '--version', '1', '--plain', '--repo', repo]);
+  assert.equal(plain1.code, 0, plain1.err);
+  assert.equal(plain1.out.trim(), rev1Body.trim(), '--plain 必须只出该版正文');
+  assert.doesNotMatch(plain1.out, /命中缓存/, '不能混进活动版本的正文');
+
+  // 人读视图：给出正文与来源，并显著说明严重度是对活动版本的判断
+  const view = await cli(['read', 'docs/api.gmd', '--block', 'b1', '--version', '1', '--repo', repo]);
+  assert.equal(view.code, 0);
+  assert.match(view.out, /该版本当时写下的正文/);
+  assert.match(view.out, /当前严重度/);
 });

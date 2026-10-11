@@ -186,6 +186,9 @@ export async function commitBlock(opts: CommitOptions): Promise<CommitResult> {
     commit: commitSha,
     src_hash: hashRange(srcText, targetRange),
     text_hash: newHash,
+    // 历史正文随版本一起落盘（阶段 4·3）：只留 text_hash 的话 `read --version <rev>`
+    // 答不出"那一版写了什么"，题面的"版本历史内嵌于 .gmd"也就落空了。
+    text: normalizeNewlines(newBody),
   };
   if (dirty) version.note = 'based_on_dirty';
 

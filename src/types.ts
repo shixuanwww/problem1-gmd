@@ -14,6 +14,19 @@ export interface GmdVersion {
   commit: string; // 记录时的仓库 HEAD commit 全 sha（= git rev-parse HEAD）
   src_hash: string; // "sha256:<hex>" —— 该 range 内文本的摘要
   text_hash: string; // "sha256:<hex>" —— 本片段正文（换行归一化为 \n 后 trim）的摘要
+  /**
+   * 该版本的**正文**（阶段 4·3）。
+   *
+   * 为什么存：题面 §2.3 要求"版本历史……全部内嵌于 .gmd"，§2.2 把"历史版本"定义为
+   * "同一片段过去生成的版本" —— 只留一个 `text_hash` 等于正文没留，`read --version <rev>`
+   * 也就答不出"那一版到底写了什么"。存了之后 `text_hash` 还从"不可验证的承诺"变成
+   * **可验证的摘要**（解析时校验 `textHash(text) === text_hash`）。
+   * 代价：每追加一版就多存一份正文，文件线性膨胀 —— 这是"单文件自包含"的必要开销。
+   *
+   * 可选字段：本实现写出的版本**一律带它**；旧格式文件（或手写的 .gmd 骨架）没有时
+   * 解析照旧通过，只是那一版取不到正文。
+   */
+  text?: string;
   note?: string; // 可选备注（序列化时须转义 "--"）
 }
 

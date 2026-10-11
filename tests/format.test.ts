@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { blockOf, cli, docPath, freshRepo, parseJson, readText, writeText } from './helpers.ts';
+import { blockOf, cli, docPath, editBlockHead, freshRepo, parseJson, readText, replaceBlockBody, writeText } from './helpers.ts';
 
 test('用例 8：块未闭合 → 退出码 2，错误信息含行号', async () => {
   const { repo } = await freshRepo();
@@ -58,7 +58,8 @@ test('首块约束：文件第一个非空内容不是 gmd:doc → 退出码 2',
 test('用例 19b：手改正文但不追加版本 → error（正文与元数据不一致），且不影响其它片段', async () => {
   const { repo } = await freshRepo();
   const raw = readText(docPath(repo));
-  const edited = raw.replace('按键取值。键不存在时返回 `null`，**不抛异常**。', '按键取值（手改，没有追加版本）。');
+  // ⚠️ 必须只改**块正文**那一份：同一个字符串也内嵌在块头的 hist[0].text 里（阶段 4·3）
+  const edited = replaceBlockBody(raw, '按键取值。键不存在时返回 `null`，**不抛异常**。', '按键取值（手改，没有追加版本）。');
   assert.notEqual(edited, raw, '替换必须生效');
   writeText(docPath(repo), edited);
 
@@ -126,4 +127,53 @@ test('用例 27：来源路径含 .. 逃逸仓库 → 格式非法（退出码 2
     assert.match(res.err, /path/);
     assert.equal(res.out.trim(), '', '格式损坏时 stdout 不得有内容（更不能回显仓库外文件）');
   }
+});
+
+/**
+ * 用例 32（阶段 4·3）：历史正文 `hist[].text` 的两条纪律 —— **带它就必须自洽**、**旧格式可读但取不到正文**。
+ */
+test('用例 32：hist[].text 与 text_hash 不一致 → 码 2；旧格式（无 text）仍可读但取不到正文', async () => {
+  const { repo } = await freshRepo();
+  const raw = readText(docPath(repo));
+
+  // (a) 手改历史正文但不改 text_hash ⇒ 元数据自相矛盾 ⇒ 格式损坏（带行号）
+  const tampered = editBlockHead(raw, 'b1', (head) => {
+    const hist = head.hist as Array<Record<string, unknown>>;
+    hist[0].text = `${String(hist[0].text)}【手改】`;
+  });
+  assert.notEqual(tampered, raw, '替换必须生效');
+  writeText(docPath(repo), tampered);
+  const bad = await cli(['read', 'docs/api.gmd', '--repo', repo]);
+  assert.equal(bad.code, 2, '历史正文必须与 text_hash 自洽，否则判格式损坏');
+  assert.match(bad.err, /不一致/);
+  assert.match(bad.err, /第 \d+ 行/);
+
+  // (b) 删掉 text 字段（模拟旧格式 / 手写骨架）⇒ 仍能正常判定，只是那一版取不到正文
+  const legacy = editBlockHead(raw, 'b1', (head) => {
+    delete (head.hist as Array<Record<string, unknown>>)[0].text;
+  });
+  writeText(docPath(repo), legacy);
+  const okRead = await cli(['read', 'docs/api.gmd', '--json', '--repo', repo]);
+  assert.equal(okRead.code, 0, `旧格式必须仍可读：${okRead.err}`);
+  assert.equal(blockOf(parseJson(okRead.out), 'b1').severity, 'ok');
+
+  const v1 = parseJson((await cli(['read', 'docs/api.gmd', '--version', '1', '--json', '--repo', repo])).out) as Array<{
+    block: string;
+    text: string | null;
+  }>;
+  assert.deepEqual(v1.map((r) => r.block), ['b1', 'b2', 'b3'], '不给 --block 时仍是全量');
+  assert.equal(v1[0].text, null, '未存正文必须显式给 null，而不是让字段凭空消失');
+  assert.ok(typeof v1[1].text === 'string' && v1[1].text.length > 0, 'b2 的 rev1 正文应当取得回');
+
+  // 只盯 b1（没存正文的那一条）：缺正文不得伪装成"空正文"
+  const plain = await cli(['read', 'docs/api.gmd', '--version', '1', '--block', 'b1', '--plain', '--repo', repo]);
+  assert.equal(plain.code, 0, '取不到正文不是错误，不该用退出码惩罚调用方');
+  assert.equal(plain.out.trim(), '', '--plain 不得把"没有正文"伪装成空正文');
+  assert.match(plain.err, /未存正文/, '必须在 stderr 明确说明原因');
+
+  // 不窄化时，有正文的块照常输出（缺的那条只是不贡献内容）
+  const plainAll = await cli(['read', 'docs/api.gmd', '--version', '1', '--plain', '--repo', repo]);
+  assert.equal(plainAll.code, 0);
+  assert.match(plainAll.out, /批量写入，顺序执行，任一失败即中断。/);
+  assert.match(plainAll.err, /未存正文[\s\S]*b1 rev 1/, '必须点名是哪一版的正文缺失');
 });
