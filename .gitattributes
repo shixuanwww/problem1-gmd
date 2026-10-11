@@ -1,0 +1,13 @@
+# 换行归一化：.gmd 与所有文本文件一律 LF
+# 理由：§3.3 的 text_hash 与 §4.3 的 hashRange 都按 "\n" 计算；
+# 若 checkout 时被转成 CRLF，hash 会对不上，步骤 0 会把整块误判为 error。
+* text=auto eol=lf
+*.gmd text eol=lf
+*.ts text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+
+# 二进制文件不要动
+*.png binary
+*.jpg binary
+*.pdf binary

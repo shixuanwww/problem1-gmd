@@ -1,0 +1,13 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# 运行时产物（原子写的临时文件）
+.gmd/tmp/
+
+# 测试 fixture 仓库：由 scripts/setup-fixtures.ts 生成，可重建
+# ⚠️ 绝不能把 fixtures/repo/.git 纳入交付 —— git 会把它记成 gitlink，克隆方拿不到文件
+fixtures/repo/
+
+# 环境变量
+.env

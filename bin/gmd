@@ -1,0 +1,5 @@
+#!/bin/sh
+# gmd —— POSIX 转发壳（PLAN §0.3：命令名必须是 gmd）
+# 不装 PATH 也能用：node --experimental-strip-types src/cli.ts ...
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec node --experimental-strip-types "$here/../src/cli.ts" "$@"

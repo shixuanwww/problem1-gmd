@@ -1,0 +1,19 @@
+{
+  "name": "gmd",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Git 衍生文档管理器（.gmd）—— 单文件自包含的衍生文档格式 + 配套 gmd CLI",
+  "bin": {
+    "gmd": "bin/gmd"
+  },
+  "scripts": {
+    "fixtures": "node --experimental-strip-types scripts/setup-fixtures.ts",
+    "test": "node --experimental-strip-types --test \"tests/*.test.ts\"",
+    "demo": "node --experimental-strip-types demo/stage1-2.ts",
+    "demo:loop": "node --experimental-strip-types demo/warning-loop.ts"
+  },
+  "engines": {
+    "node": ">=22.6"
+  }
+}
