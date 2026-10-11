@@ -155,7 +155,7 @@ README、设计说明、接口说明、运维手册常**由代码或配置衍生
 .gmd 文件 := [BOM] [空行] doc 头块 block*
 doc 头块  := "<!-- gmd:doc " <JSON> "-->"          ← 文件内第一个非空内容，必须存在
 block     := "<!-- gmd:block " <JSON> "-->" 正文 "<!-- /gmd:block -->"
-正文      := 任意 Markdown（可含空行、代码块、HTML），但不含 "<!-- gmd:block"
+正文      := 任意 Markdown（可含空行、围栏代码块、HTML）；围栏代码块内的 gmd 标记字面量不算标记
 其余      := 块外的普通 Markdown = 自由文本，不参与判定
 ```
 
@@ -207,7 +207,7 @@ block     := "<!-- gmd:block " <JSON> "-->" 正文 "<!-- /gmd:block -->"
 export interface GmdVersion {
   rev: number;              // 单调递增，从 1 开始；= hist 下标 + 1
   at: string;               // ISO8601 UTC，生成时刻
-  path: string;             // 源文件路径，相对仓库根，正斜杠
+  path: string;             // 源文件路径，相对仓库根，正斜杠；**不得含 .. / . / 空段**（本次复核新增，防越界读文件）
   range: [number, number];  // 1-based 闭区间 [l0, l1]，l0 <= l1
   commit: string;           // 记录时的仓库 HEAD commit 全 sha（= git rev-parse HEAD，§4.6.2）
   src_hash: string;         // "sha256:<hex>" —— 该 range 内文本的摘要
@@ -334,7 +334,7 @@ export class GmdFormatError extends Error {
 2) 取当前文件文本 / 行
    nowText  = readFile(repo/v.path)          ← UTF-8 原文（§4.1）
    nowLines = nowText.split(/\r?\n/)         ← **只用于行数、步骤 5/6 与展示**
-   （若 v.range[1] > nowLines.length → 不立即 error，进入 3/5 的内容锚定）
+   （若 v.range[1] > 当前文件行数 → **在步骤 3.5 直接判 error**，不再往下做内容锚定）
    ⚠️ **dirty 判定不得使用 `nowLines`**（见步骤 3）：行数组已完成一次切分，
       拿它去和 `git show` 的结果直接比，会把 CRLF/LF 差异误判成"内容变了"。
 
@@ -345,9 +345,9 @@ export class GmdFormatError extends Error {
        失败 **且工作区存在** `v.path`（源文件是新增/未跟踪）→ 视为**未提交**，
          按下面的 dirty 分支处理：dirty = true、severity = warning、writable = false、
          返回（不再往下判）；
-       失败 **且工作区也不存在** → 再看 `git log --all -- <path>`：
-           曾存在过 → error("引用目标已被删除")；从未存在 → error("引用目标不存在")
-           （两者都不得输出旧文字。步骤 1 已先判过工作区存在性，本分支是防御性兜底）
+      失败 **且工作区也不存在** → error("引用文件不存在: <path>")
+          （步骤 1 已先判过工作区存在性，本分支只是 TOCTOU 兜底：两次调用之间文件被删掉了。
+            两者都不得输出旧文字）
    🔒 **dirty 的判定口径写死（唯一实现，不得另造一份比较逻辑）**：
        isRangeDirty(path, range) := hashRange(nowText, range) !== hashRange(headText, range)
      `nowText` = 工作区文件全文（步骤 2 读到的 UTF-8 原文）、`headText` = `git show HEAD:<path>` 的 stdout 原文；
@@ -355,13 +355,22 @@ export class GmdFormatError extends Error {
      `'\n'` 连接）归一化后再比**。**禁止**直接比较原文、行数组（`nowLines` / `headLines`），或用第二套切分口径。
      ⇒ **换行差异不构成 dirty**：本机 `core.autocrlf=true` 时工作区是 CRLF、`git show HEAD:` 给的是 LF，
        只要引用范围内**语义相同**就必须判 equal（否则所有块永久 dirty ⇒ 全块 `warning` + `writable = false`）。
-   if isRangeDirty(v.path, v.range):
-       → dirty = true，severity = warning
-         reason = "引用范围内存在未提交修改"
-         writable = false                        ← 题面：不允许写回
-         记 changes = 该范围内的行级差异
-         currentSource = nowLines 在 range 内的内容
-         返回（不再往下判）
+  if isRangeDirty(v.path, v.range):
+      → dirty = true，severity = warning
+        reason = "引用范围内存在未提交修改"
+        writable = false                        ← 题面：不允许写回
+        记 changes = 该范围内的行级差异
+        currentSource = nowLines 在 range 内的内容
+        返回（不再往下判）
+
+3.5) 引用范围是否仍然存在（**在 dirty 分支之后、内容比对之前**；本次复核新增）
+   countLines(nowText) < v.range[1]
+       → error("引用范围已不存在（来源现有 N 行，引用 a-b）")，currentSource = null，changes = []
+         writable = false；dirty 仍如实计算并附上（越界 != 未提交，两个信号正交）
+   🔑 **为什么必须单独判**：`hashRange` 用 `slice(l0-1, l1)` 实现，范围越界时**静默截断**；
+      范围全在文件外时切片为空 ⇒ 返回**空串的 sha256**。于是"引用目标已消失"与"范围内是空内容"
+      在 hash 层面无法区分 ⇒ 若写回侧沿用越界 range（见 §4.6.2 校验 5），下一次 read 就是
+      "空串哈希 === 空串哈希" ⇒ **伪造成 ok**，违反题面"引用目标消失 ⇒ error""绝不判为可用"。
 
 4) 内容比对（range 内）
    nowHash = hashRange(当前文件文本, v.range)      ← 唯一实现，见下
@@ -483,6 +492,7 @@ export class GmdFormatError extends Error {
 | 2 | `--block` 存在；草稿头的 `base_rev`（若来自 `edit`）等于当前活动版本 `rev` | 拒绝："草稿基于旧版本 rev=N，当前为 M"（**防止覆盖别人的改动**） |
 | 3 | **来源未提交修改闸门**：`judgeBlock(...).dirty === true`（**即 `isRangeDirty(path, range)` 为真**）且**未传 `--allow-dirty`** | 拒绝："来源存在未提交修改，默认拒绝写入"（题面硬约束 5） |
 | 4 | 提交后的 `text_hash`（`textHash(新正文)`，§3.3 的唯一实现：换行归一化为 `\n` 后 `trim`）与当前活动版本的 `text_hash` 相同 | 拒绝："内容未变化"（避免造无效版本） |
+| 5 | **引用范围仍然存在**：`countLines(来源当前文本) < active.range[1]`（本次复核新增） | 拒绝："引用范围 a-b 已不存在（来源现有 N 行）"（码 4）。**为什么要有**：越界 range 会让 `hashRange` 静默截断成空串哈希，照写就会产出"引用目标已消失却自证一致"的版本 ⇒ 下一次 read 判 `ok`。与 §4.3 步骤 3.5 是同一件事的两道闸 |
 
 通过后：
 
@@ -530,7 +540,7 @@ export class GmdFormatError extends Error {
 | 1 | 参数错误 / 用法错误 |
 | 2 | **格式损坏**（解析失败） |
 | 3 | **存在 `error` 块**（`read` 专用 —— 让 AI/脚本能直接分支处理） |
-| 4 | 写回被拒（§4.6.2 步骤 0 + 四道校验） |
+| 4 | 写回被拒（§4.6.2 步骤 0 + 五道校验） |
 | 5 | 环境错误（`git` 不存在、`--repo` 不是仓库；**含 git 子进程非零退出或超时**，§4.8；见 §11） |
 
 - `--repo <path>` 是**全局选项**，可出现在子命令前或后。
@@ -573,7 +583,7 @@ export class GmdFormatError extends Error {
 
 ### 阶段 3 —— 改得回（**本题核心目的**）
 
-- CLI：`edit`（草稿文件 + 冲突视图到 stderr）、`commit`（**步骤 0 草稿头剥离 + 四道校验** + 原子写 + 追加 hist）
+- CLI：`edit`（草稿文件 + 冲突视图到 stderr）、`commit`（**步骤 0 草稿头剥离 + 五道校验** + 原子写 + 追加 hist）
 - 冲突视图渲染（`render.ts`）：严重度 / 变更点 / 来源当前内容 / 下一命令建议
 - **新建通路（P2-4）**：本版**不新增 `gmd new` 子命令**（题面参考接口只有 `read`/`log`/`edit`/`commit`）。从零建文档的通路是**按 §3.1 手写**：先写 `<!-- gmd:doc {...} -->` 头，再写 `<!-- gmd:block {...} -->` 正文 `<!-- /gmd:block -->`（`hist[0]` 用 `hashRange` 实测值）；**新建片段同理**（在已有文档里插入一个块头 → 首次 `commit` 追加 `rev=1`）。**README 的"快速开始"必须给出这段可复制的最小骨架**，并在 §10"已实现/未实现"里声明"未提供 `gmd new`"。
 - **闭环演示**：`demo/warning-loop.ts` 一键跑通"**读 → 判断 → 重写 → 提交**"，且**全程无人工干预**
@@ -707,6 +717,10 @@ node --experimental-strip-types --test tests/*.test.ts
 | 21（可选，阶段 4·2） | MCP：stdio 发 `tools/list` + `tools/call`（`gmd_read`） | 返回合法 JSON-RPC 响应，内容与 CLI `read --json` 一致 |
 | 22（可选，阶段 4·3） | `v.commit` 不是 `HEAD` 祖先（另起分支改来源后 commit） | 降级为 `warning`，reason 提示"来源来自其它分支" |
 | **23**（P2 补，**非可选**） | **换行不构成 dirty**：一段已提交的引用（其 `src_hash` 由 `hashRange` 实测）在工作区被换成 **CRLF** 字节（`core.autocrlf=true` 的 checkout 效果，或直接把 CRLF 写回工作区）、`HEAD` 里仍是 **LF**，引用范围内内容**语义相同**且**不提交** | `severity === "ok"`、`dirty === false`、`writable === true`（**不是** `warning`，也不禁止写回）—— 必须走 §4.3 步骤 3 的 `isRangeDirty` 唯一口径 `hashRange(nowText, range) !== hashRange(headText, range)`（两边都 `split(/\r\n|\r|\n/)` 后再以 `\n` 连接）；防止把 CRLF/LF 差异误判成"内容变了"（跑完把该文件恢复为 LF 并 `git checkout -- <path>`，避免污染后续用例） |
+| **24**（P0 回归，**非可选**，第二轮复核新增） | 来源被**截断到引用范围之外**（已提交）：`b1` 引 `[10,24]`，把 `src/kv.ts` 砍到只剩 9 行 | `severity === "error"`、`currentSource === null`、`changes === []`、`writable === false`（§4.3 步骤 3.5）；`b3` 仍 `ok`（片段级独立）。**修复前**这条只能靠 hash 不等偶然判对，写回侧仍会把越界 range 洗成 `ok` |
+| **25**（P0 回归·写回闸门，**非可选**，第二轮复核新增） | 同 24 的前置（范围已不存在）后执行 `commit`（`--input -` 给新正文） | **拒绝（码 4）**、理由含"已不存在"、`.gmd` **逐字节不变**、`rev` 仍为 1，且**再 read 仍为 `error`**（绝不能被洗成 `ok`）—— §4.6.2 校验 5 |
+| **26**（回归，第二轮复核新增） | 块正文在**围栏代码块**里写 `<!-- gmd:block … -->` / `<!-- /gmd:block -->` 字面量后 `commit` | 写回与解析都成功（**不是码 2**）；该块 `ok`、`rev+1`；围栏原样保留。§4.1 围栏豁免 |
+| **27**（安全回归，第二轮复核新增） | `hist[].path` 改成 `../outside.ts` / `src/../../outside.ts` / `/etc/hosts` / `C:/Windows/win.ini` / `src//kv.ts` | 一律**码 2**（格式损坏）、`stdout` 为空。**修复前**会把仓库外文件内容当 `currentSource` 回显。§3.1 路径纪律 + §4.1 `resolveInRepo` 兜底 |
 
 > 🔴 **用例 0 不是"随便跑一下"，是 3/5/7/13/16 的**前置条件**：演示与测试里每一次"改源文件"之后，都必须**显式提交**（见 §9.2 / §9.3 的注解），否则 dirty 短路让这些用例断言失败。**全文唯一允许不提交源改动的地方是用例 6、用例 14 与用例 23**（23 只改换行字节：CRLF 工作区 vs LF HEAD，属"换行不构成 dirty"）。**
 
@@ -810,7 +824,7 @@ node --experimental-strip-types demo/warning-loop.ts         # 阶段 3：无人
 | 文件重命名 | **不做跟踪**（按"文件不存在"判 error）；写进 README 的"未实现" |
 | 写回原子性 | 写 `.tmp` → `rename` |
 | 块外文本（非正文部分） | 写回时**逐字节保留**，只把换行统一为 `\n`（§3.4）；仓库按 `.gitattributes` 强制 LF ⇒ "换行归一化"与"逐字节不变"等价（§8 用例 17） |
-| 退出码 | **0** 成功（`read` 时所有块均非 error）/ **1** 参数·用法错 / **2** 格式损坏（解析失败）/ **3** 存在 `error` 块（`read` 专用）/ **4** 写回被拒（§4.6.2 步骤 0 + 四道校验）/ **5** 环境错误（`git` 不存在、`--repo` 不是仓库、git 子进程非零退出或超时）；详见 §4.9 |
+| 退出码 | **0** 成功（`read` 时所有块均非 error）/ **1** 参数·用法错 / **2** 格式损坏（解析失败；含来源路径逃逸仓库）/ **3** 存在 `error` 块（`read` 专用）/ **4** 写回被拒（§4.6.2 步骤 0 + 五道校验）/ **5** 环境错误（`git` 不存在、`--repo` 不是仓库、git 子进程非零退出或超时）；详见 §4.9 |
 | 阶段 4 选做项与预留用例编号 | 三条选做：① **`--allow-dirty` 受控写回**（首选，题面显式列出的命令参数）② **MCP 集成** ③ **分支/祖先判断**；**做哪条就补 §8 哪条用例**：①→用例 **20**、②→**21**、③→**22**（§8 已按 20/21/22 预留三条"可选"行）；**20/21/22 已被占用，故 §8 新增用例一律从 `23` 起编** —— 用例 **23 是阶段 1 的 `isRangeDirty` 口径回归用例（非选做、必做，已列入阶段 1 验收）**；未做则整条跳过，并在 README"已实现 / 未实现"里如实声明（§5 阶段 1 / 阶段 4） |
 | 仓库换行约定 | 仓库内文本一律 **LF**：`.gitattributes` 写 `*.gmd text eol=lf`（§3.4 / §7 / §10 第 11 条）；写入侧先把换行归一化为 `\n` 再落盘 |
 | fixture 的排除与复现 | **整目录排除 `fixtures/repo/`**（其源文件与 `.git` **一律不入库** —— 避免与脚本悄悄漂移、避免被父库记成 gitlink）与 `.gmd/tmp/`；`scripts/setup-fixtures.ts` **第一件事是 `rm -rf fixtures/repo` 再重建**，每次 `git commit` 注入固定 **`GIT_AUTHOR_DATE` / `GIT_COMMITTER_DATE`**（另加 `-c core.autocrlf=false`），保证重跑后 commit sha 一致（§7 / §8 用例 0 / 附二1） |
@@ -828,6 +842,9 @@ node --experimental-strip-types demo/warning-loop.ts         # 阶段 3：无人
 | 语言 / 运行环境 | **TypeScript + Node**（零第三方依赖，唯一外部程序是 `git`）；**Node ≥ 22.6（建议 ≥ 22.18）** + `node --experimental-strip-types`；相对 import 必须带 `.ts` 后缀；禁用 `enum` / `namespace` / 装饰器 / 构造函数参数属性 / `tsconfig paths` 别名（§0 第 2 条 / §2 / §2.1） |
 | 元数据编码 | 注释内 **JSON**：解析允许跨多行，**序列化输出为紧凑单行**（§2 / §3.4） |
 | 分隔符安全 | 序列化 JSON 时把 `--` 转义为 `\u002d\u002d`（只处理 JSON 字面量，不动正文）；解析时若注释提前闭合 → 视为格式损坏（§2 / §3.1 / §3.4） |
+| 围栏代码块豁免（本次复核新增） | 扫描标记时先算出**已闭合**的 ```/~~~ 围栏字符区间，落在其中的 `<!-- gmd:… -->` **不当标记**；未闭合的围栏不入表（不得吞掉真标记）。理由：讲 .gmd 格式的文档必然在代码块里写标记示例，不豁免会误判"片段嵌套/未闭合"（§3.1 / §4.1） |
+| 引用范围存在性（本次复核新增） | 判定侧 §4.3 步骤 3.5 + 写回侧 §4.6.2 校验 5：`countLines(来源) < range[1]` ⇒ 判定 `error` / 写回拒（码 4）。理由：`hashRange` 对越界 range **静默截断**成空串哈希，会与"范围内是空内容"不可区分 ⇒ 沿用越界 range 写回会把 `error` 伪造成 `ok`（§4.3 / §4.6.2 / §8 用例 24、25） |
+| 来源路径必须落在仓库内（本次复核新增） | `hist[].path` 拒绝绝对路径 / 盘符 / 反斜杠 / `..` / `.` / 空段 ⇒ 格式错（码 2）；`gitrepo.resolveInRepo` 再兜底。理由：否则一份 `.gmd` 就能让 `gmd read` 把仓库外文件内容当"来源当前内容"回显（§3.1 / §4.1 / §8 用例 27） |
 
 ---
 

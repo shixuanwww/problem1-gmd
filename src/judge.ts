@@ -6,6 +6,7 @@
  *   步骤 1  引用文件是否存在
  *   步骤 2  读工作区原文（严格 UTF-8）
  *   步骤 3  范围级 dirty 检查（worktree vs HEAD；**换行差异不算脏**）
+ *   步骤 3.5 引用范围是否仍然存在（越界 ⇒ error；防 hashRange 静默截断伪造成 ok）
  *   步骤 4  范围内容 hash 比对         → ok
  *   步骤 5  内容锚定（±50 行滑窗）      → warning（内容还在，只是行号漂了）
  *   步骤 6  相似度分段判定              → warning / error
@@ -18,10 +19,10 @@ import type { BlockJudgement, GmdBlock, ParsedGmd, Severity } from './types.ts';
 import {
   GitError,
   SourceEncodingError,
+  countLines,
   hashRange,
   isRangeDirtyTexts,
   normalizeEol,
-  pathEverExisted,
   rangeLines,
   readWorktreeText,
   showText,
@@ -145,13 +146,26 @@ export async function judgeBlock(block: GmdBlock, repo: string, opts: JudgeOptio
     throw e;
   }
 
+  // ---- 步骤 3.5：引用范围是否仍然存在（题面 §2.4：整段被删除 ⇒ error，绝不判为可用）----
+  // 为什么必须单独判：range 越界时 hashRange 会**静默截断**，范围全在文件外时退化成空串哈希。
+  // 若写入侧沿用越界 range（见 commit.ts 的同类闸门），"引用目标已消失"会被记成 hash 一致 ⇒ 伪造成 ok。
+  const srcLineCount = countLines(nowText);
+  if (v.range[1] > srcLineCount) {
+    // 仍如实报告 dirty：范围不存在与"未提交"是两件事，AI 需要同时看到。
+    const dirtyOutOfRange = headText === null ? true : isRangeDirtyTexts(nowText, headText, v.range);
+    return errorJudgement(
+      block,
+      `引用范围已不存在（来源现有 ${srcLineCount} 行，引用 ${v.range[0]}-${v.range[1]}）`,
+      dirtyOutOfRange,
+    );
+  }
+
   if (headText === null) {
-    // `git show HEAD:<path>` 取不到：先分「仓库没有 HEAD」与「该路径不在 HEAD 里」。
+    // `git show HEAD:<path>` 取不到：仓库没有 HEAD，或该路径不在 HEAD 里。
     // 工作区存在（步骤 1 已保证）⇒ 来源是新增 / 未跟踪 ⇒ 视为未提交修改。
-    // 防御性兜底：工作区也不存在时才去看历史，区分"曾被删除"与"从未存在"。
     if (!worktreeFileExists(repo, v.path)) {
-      const everExisted = await pathEverExisted(repo, v.path);
-      return errorJudgement(block, everExisted ? '引用目标已被删除' : '引用目标不存在');
+      // 竞态兜底：步骤 1 之后文件被删掉了。
+      return errorJudgement(block, `引用文件不存在: ${v.path}`);
     }
     return judgement(block, 'warning', '引用范围内存在未提交修改', {
       dirty: true,

@@ -9,12 +9,48 @@
 
 import { GmdFormatError } from './types.ts';
 import type { GmdBlock, GmdDoc, GmdVersion, ParsedGmd } from './types.ts';
+// 🔒 路径纪律与 gitrepo 共用**同一份**判定（仓库纪律：一个口径只有一份实现），
+// 不在这里另抄一遍。见 gitrepo.ts 的 isRepoRelativePath / resolveInRepo。
+import { isRepoRelativePath } from './gitrepo.ts';
 
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const HASH_RE = /^sha256:[0-9a-f]{64}$/;
 
 /** 匹配三种标记：doc / block 开 / block 闭。JSON 允许跨多行。 */
 const MARKER_RE = /<!--\s*(\/?)\s*gmd:(doc|block)\b\s*([\s\S]*?)-->/g;
+
+/**
+ * **已闭合**的围栏代码块（``` / ~~~）覆盖的字符区间。
+ *
+ * 为什么需要：题面要求「普通 Markdown 阅读体验不应被明显破坏」。一份**讲 .gmd 格式本身**的
+ * 文档必然会在围栏代码块里写出 `<!-- gmd:block ... -->` 这类**字面量**；若把它们当真标记，
+ * 合法文档会被判成「片段嵌套 / 未闭合」（退出码 2）—— 工具连自己都没法写文档。
+ * 只承认**已闭合**的围栏：正文里一个没配对的围栏不得把后面真正的块标记一起吞掉。
+ */
+function scanFenceSpans(text: string): Span[] {
+  const spans: Span[] = [];
+  let pos = 0;
+  let open: { ch: string; len: number; start: number } | null = null;
+  while (pos <= text.length) {
+    const nl = text.indexOf('\n', pos);
+    const lineEnd = nl === -1 ? text.length : nl;
+    const line = text.slice(pos, lineEnd).replace(/\r$/, '');
+    if (open === null) {
+      const m = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+      if (m !== null) open = { ch: m[1][0], len: m[1].length, start: pos };
+    } else if (new RegExp(`^ {0,3}${open.ch}{${open.len},}\\s*$`).test(line)) {
+      spans.push({ start: open.start, end: lineEnd });
+      open = null;
+    }
+    if (nl === -1) break;
+    pos = nl + 1;
+  }
+  return spans;
+}
+
+function insideSpans(spans: Span[], offset: number): boolean {
+  return spans.some((s) => offset >= s.start && offset < s.end);
+}
 
 export const BLOCK_CLOSE = '<!-- /gmd:block -->';
 
@@ -63,10 +99,13 @@ function firstNonEmptyLine(text: string): number {
 }
 
 function scanMarkers(text: string): Marker[] {
+  const fences = scanFenceSpans(text);
   const out: Marker[] = [];
   MARKER_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = MARKER_RE.exec(text)) !== null) {
+    // 围栏代码块里的字面量不是标记（见 scanFenceSpans 的说明）。
+    if (insideSpans(fences, m.index)) continue;
     const isClose = m[1] === '/';
     const name = m[2];
     out.push({
@@ -119,8 +158,13 @@ function validateVersion(raw: unknown, index: number, line: number): GmdVersion 
   if (typeof at !== 'string' || at.length === 0) {
     throw new GmdFormatError(`${where}.at 必须是非空字符串`, line);
   }
-  if (typeof path !== 'string' || path.length === 0 || path.startsWith('/') || path.includes('\\')) {
-    throw new GmdFormatError(`${where}.path 必须是相对仓库根的正斜杠路径`, line);
+  // 🔒 安全闸门（不是洁癖）：`.gmd` 是给 AI 读的、可能由模型生成。若放任 `path: "../../x"`，
+  // 一份文档就能让 `gmd read` 把仓库外的任意文件内容当「来源当前内容」打印出来。
+  if (typeof path !== 'string' || !isRepoRelativePath(path)) {
+    throw new GmdFormatError(
+      `${where}.path 必须是仓库内的相对正斜杠路径（不得是绝对路径 / 盘符，且不得含 .. / . / 空段）`,
+      line,
+    );
   }
   if (
     !Array.isArray(range) ||

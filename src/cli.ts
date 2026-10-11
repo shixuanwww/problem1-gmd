@@ -18,12 +18,14 @@ import { draftPathFor, writeDraft } from './edit.ts';
 import { parseGmd } from './format.ts';
 import {
   GitError,
+  RepoPathError,
   SourceEncodingError,
   commitsTouchingRange,
   countLines,
   findRepoRoot,
   gitVersion,
   historyForPath,
+  isRepoRelativePath,
   readWorktreeText,
   worktreeFileExists,
 } from './gitrepo.ts';
@@ -78,6 +80,7 @@ const USAGE = `gmd —— Git 衍生文档管理器（.gmd）
   --repo <path>   指定 Git 仓库（缺省从当前目录向上找 .git）
   --json          单行 JSON 输出（失败时为 {"error","code"}）
   --plain         只出正文（read 专用，与 --json 互斥）
+  -h, --help      显示本帮助
 
 退出码：0 成功 · 1 参数错 · 2 格式损坏 · 3 存在 error 块 · 4 写回被拒 · 5 环境错误`;
 
@@ -96,6 +99,10 @@ function parseArgs(argv: string[]): ParsedArgs {
     if (tok === '--') {
       positionals.push(...argv.slice(i + 1));
       break;
+    }
+    if (tok === '-h') {
+      flags.set('help', true);
+      continue;
     }
     if (tok.startsWith('--')) {
       const eq = tok.indexOf('=');
@@ -292,6 +299,9 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
       }
       if (typeof pathFlag === 'string') {
         const src = pathFlag.split('\\').join('/');
+        if (!isRepoRelativePath(src)) {
+          return fail(EXIT.USAGE, `--path 必须是仓库内的相对路径（不得是绝对路径 / 盘符，且不得含 .. / . / 空段）: ${pathFlag}`);
+        }
         let note: string | undefined;
         let commits;
         if (typeof rangeFlag === 'string') {
@@ -392,6 +402,8 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
   } catch (e) {
     if (e instanceof GmdFormatError) return fail(EXIT.FORMAT, `${e.message}（第 ${e.line} 行）`);
     if (e instanceof CommitRejected) return fail(EXIT.REJECTED, e.message);
+    // 元数据里的来源路径逃出仓库 ⇒ 视同格式非法（第一道闸在 parseGmd，这是兜底）
+    if (e instanceof RepoPathError) return fail(EXIT.FORMAT, `来源路径非法：${e.message}`);
     if (e instanceof GitError) return fail(EXIT.ENV, `环境错误：${e.message}`);
     if (e instanceof SourceEncodingError) return fail(EXIT.ENV, `环境错误：${e.message}`);
     // ENOENT 等文件系统错误

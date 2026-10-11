@@ -1,9 +1,9 @@
 /**
  * `gmd commit` —— 写回闸门 + 原子写（PLAN §4.6.2，阶段 3 的核心）。
  *
- * 提交前依次通过：步骤 0（剥离草稿头）+ 四道校验，任一不过**拒绝写回**（CLI 映射为退出码 4）：
+ * 提交前依次通过：步骤 0（剥离草稿头）+ 五道校验，任一不过**拒绝写回**（CLI 映射为退出码 4）：
  *   1 正文非空；2 草稿 base_rev == 当前活动版本；3 来源未提交修改闸门（除非 --allow-dirty）；
- *   4 内容确有变化（不然就是造无效版本）。
+ *   4 内容确有变化（不然就是造无效版本）；5 引用范围仍然存在（越界 ⇒ 拒写，防伪造成 ok）。
  * 通过后：重算 commit / src_hash（**沿用它记录的旧 range**）→ 追加 hist → 原子写（.tmp → rename）。
  */
 
@@ -11,7 +11,7 @@ import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 
 import { normalizeNewlines, parseGmd, serializeGmd } from './format.ts';
 import { draftPathFor, nowIso, stripDraftHeader } from './edit.ts';
-import { SourceEncodingError, hashRange, readWorktreeText, revParseHead, textHash } from './gitrepo.ts';
+import { SourceEncodingError, countLines, hashRange, readWorktreeText, revParseHead, textHash } from './gitrepo.ts';
 import { judgeBlock } from './judge.ts';
 import type { GmdVersion } from './types.ts';
 
@@ -120,6 +120,18 @@ export async function commitBlock(opts: CommitOptions): Promise<CommitResult> {
   if (commitSha === null) throw new CommitRejected('仓库没有 HEAD 提交，无法记录来源版本');
   // 来源文件已被删除 / 变成二进制时，这里会抛 CommitRejected（码 4），而不是裸 ENOENT（码 1）。
   const srcText = await readSourceForCommit(opts.repo, active.path);
+
+  // 🔒 越界闸门（P0 回归）：range 全在文件外时 hashRange 会**静默截断**成空串哈希，
+  // 沿用旧的越界 range 就会写出"引用目标已消失、却自证与当前内容一致"的无效版本
+  // —— 下一次 read 会把它判成 ok（题面明确要求"绝不判为可用"）。宁拒不写。
+  const srcLineCount = countLines(srcText);
+  if (active.range[1] > srcLineCount) {
+    throw new CommitRejected(
+      `引用范围 ${active.range[0]}-${active.range[1]} 已不存在（来源现有 ${srcLineCount} 行），拒绝写入无法自洽的新版本；` +
+        '阶段 1–3 的 range 只能沿用旧范围，请先恢复来源文件，或把引用改到仍存在的范围',
+    );
+  }
+
   const version: GmdVersion = {
     rev: active.rev + 1,
     at: opts.at ?? nowIso(),

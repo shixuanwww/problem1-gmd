@@ -170,3 +170,26 @@ test('用例 23：工作区是 CRLF、HEAD 是 LF、内容语义相同 → ok，
   const raw = readText(srcPath(repo));
   assert.ok(raw.includes('\r\n'), '确认工作区确实是 CRLF');
 });
+
+/**
+ * 用例 24（P0 回归）：来源被**截断到引用范围之外**（已提交）⇒ 引用目标整段消失 ⇒ `error`。
+ *
+ * 修复前这里也是 error（靠 hash 不等），但**写回侧**会沿用越界的旧 range 重算 src_hash：
+ * `hashRange` 对越界范围静默截断成空串哈希，下一次 read 就比较空串哈希 === 空串哈希 ⇒ **ok**。
+ * 于是"引用目标早已消失"的片段被伪造成"内容未变化、可直接用"。
+ */
+test('用例 24：来源被截断到引用范围之外（已提交）→ error，且范围越界不得被当成内容未变化', async () => {
+  const { repo } = await freshRepo();
+  writeText(srcPath(repo), KV_TS.split('\n').slice(0, 9).join('\n') + '\n'); // 只剩 9 行，b1 的 [10,24] 已不存在
+  await commitAll(repo, 'case 24: 截断到引用范围之外', D);
+
+  const payload = await judge(repo);
+  for (const id of ['b1', 'b2']) {
+    const b = blockOf(payload, id);
+    assert.equal(b.severity, 'error', `${id} 的引用范围已整段消失，必须判 error`);
+    assert.equal(b.currentSource, null, 'error 必须刻意隐藏旧文字');
+    assert.deepEqual(b.changes, []);
+    assert.equal(b.writable, false, 'error 一律不可写回');
+  }
+  assert.equal(blockOf(payload, 'b3').severity, 'ok', '片段级独立：b3 的来源没被动');
+});

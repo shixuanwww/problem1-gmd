@@ -211,8 +211,38 @@ export function findRepoRoot(startDir: string): string | null {
   }
 }
 
+/** 元数据 / 参数里的来源路径逃出仓库（`..` / 绝对路径 / 盘符）—— 视同格式非法，CLI 映射为退出码 2。 */
+export class RepoPathError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RepoPathError';
+  }
+}
+
+/** 是否是可安全解析的仓库相对路径（正斜杠、无盘符与反斜杠、无空段、无 `.` / `..`）。 */
+export function isRepoRelativePath(p: string): boolean {
+  if (p.length === 0 || p.startsWith('/') || p.includes('\\') || /^[A-Za-z]:/.test(p)) return false;
+  return p.split('/').every((seg) => seg.length > 0 && seg !== '.' && seg !== '..');
+}
+
+/**
+ * 把来源相对路径解析为绝对路径，并**确保结果仍在仓库内**。
+ *
+ * 这是不信任 .gmd 元数据的第二道闸（第一道在 `format.ts` 的 `validateVersion`）：
+ * 否则 `path: "../../secret"` 就能让 gmd 读出仓库外的任意文件。
+ */
+export function resolveInRepo(repo: string, relPath: string): string {
+  if (!isRepoRelativePath(relPath)) throw new RepoPathError(`路径必须是仓库内的相对路径: ${relPath}`);
+  const root = path.resolve(repo);
+  const abs = path.resolve(root, relPath);
+  if (abs !== root && !abs.startsWith(root + path.sep)) {
+    throw new RepoPathError(`路径逃出仓库: ${relPath}`);
+  }
+  return abs;
+}
+
 export function worktreePath(repo: string, relPath: string): string {
-  return path.resolve(repo, relPath);
+  return resolveInRepo(repo, relPath);
 }
 
 export function worktreeFileExists(repo: string, relPath: string): boolean {
@@ -245,13 +275,6 @@ export async function showText(repo: string, commit: string, relPath: string): P
   if (res.timedOut || res.spawnError) ensureOk(res, `git show ${commit}:${relPath}`, repo);
   if (res.status !== 0) return null;
   return decodeStrict(res.stdout);
-}
-
-/** 该路径在**任何**分支/历史里是否出现过。 */
-export async function pathEverExisted(repo: string, relPath: string): Promise<boolean> {
-  const res = await runGit(repo, ['log', '--all', '--pretty=format:%H', '--', relPath]);
-  ensureOk(res, `git log --all -- ${relPath}`, repo);
-  return decodeLoose(res.stdout).trim().length > 0;
 }
 
 /**
@@ -291,6 +314,7 @@ function parseLog(out: string): CommitRecord[] {
 
 /** 某个来源文件的提交历史（题面阶段 2 的「追查入口」：AI 无需自己调用 git）。 */
 export async function historyForPath(repo: string, relPath: string): Promise<CommitRecord[]> {
+  resolveInRepo(repo, relPath); // 路径必须落在仓库内（结果不用，只做校验）
   const res = await runGit(repo, ['log', LOG_FORMAT, '--', relPath]);
   ensureOk(res, `git log -- ${relPath}`, repo);
   return parseLog(decodeLoose(res.stdout));
@@ -301,6 +325,7 @@ export async function historyForPath(repo: string, relPath: string): Promise<Com
  * 调用前**必须先判** b <= 当前文件行数（否则 git 会 fatal 退出，码 128）。
  */
 export async function commitsTouchingRange(repo: string, relPath: string, a: number, b: number): Promise<CommitRecord[]> {
+  resolveInRepo(repo, relPath); // 路径必须落在仓库内（结果不用，只做校验）
   const res = await runGit(repo, ['log', LOG_FORMAT, `-L`, `${a},${b}:${relPath}`]);
   ensureOk(res, `git log -L ${a},${b}:${relPath}`, repo);
   return parseLog(decodeLoose(res.stdout));

@@ -207,3 +207,32 @@ test('写回是原子写：临时文件不残留，且 commit 只改目标片段
   assert.equal(blockOf(payload, 'b3').rev, 1, 'b3 不应被改动');
   await commitAll(repo, 'step: 记录 docs 变更', D2);
 });
+
+/**
+ * 用例 25（P0 回归·写回闸门）：引用范围已整段消失时 **禁止写回**。
+ *
+ * 越界的 range 会让 `hashRange` 静默截断成空串哈希；若沿用旧 range 写回，就会产出一个
+ * "引用目标已消失、却自证与当前内容一致"的版本 —— 下一次 `read` 会把它判成 `ok`，
+ * 直接违反题面「引用目标消失 ⇒ error，必须重写」「绝不判为可用」。
+ * 正确行为：拒写（码 4）+ 文档逐字节不变 + 仍为 error + 不凭空多出版本。
+ */
+test('用例 25：引用范围已不存在时 commit 必须拒写（码 4），不得把 error 洗成 ok', async () => {
+  const { repo } = await freshRepo();
+  writeText(srcPath(repo), KV_TS.split('\n').slice(0, 9).join('\n') + '\n');
+  await commitAll(repo, 'case 25: 截断到引用范围之外', D);
+
+  const before = blockOf(parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out), 'b1');
+  assert.equal(before.severity, 'error', '前置状态必须是 error');
+
+  const raw = readText(docPath(repo));
+  const res = await cli(['commit', 'docs/api.gmd', '--block', 'b1', '--repo', repo, '--input', '-', '--json'], {
+    stdin: NEW_BODY,
+  });
+  assert.equal(res.code, 4, '越界 range 必须走"写回被拒"（4）');
+  assert.match((parseJson(res.out) as { error: string }).error, /已不存在/);
+  assert.equal(readText(docPath(repo)), raw, '被拒时 .gmd 必须逐字节不变');
+
+  const after = blockOf(parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out), 'b1');
+  assert.equal(after.severity, 'error', '关键回归：拒绝之后必须仍是 error，绝不能被洗成 ok');
+  assert.equal(after.rev, 1, '不得凭空多出一个版本');
+});

@@ -137,3 +137,28 @@ PLAN §4 明确写"以下函数签名只是建议（属契约自由度）"。实
 
 **修复后全量复跑**：`--test` **29/29 通过**；`demo/stage1-2.ts` 与 `demo/warning-loop.ts` 均退出 0 且输出符合预期。
 
+---
+
+## 6. 2026-10-11 第二轮复核（对抗性探针）与修复记录
+
+第二轮不再只看单测，而是**在临时仓库里端到端造场景**（截断来源、删来源、手写越界 range、
+在围栏代码块里写标记字面量、把 `path` 指向仓库外……），对照题面逐条验。3 个探针脚本见
+工作区外留档（`gmd-probe*.mjs`），下面只记结论与修法。修掉 3 处，其余如实登记为未做。
+
+| # | 问题（严重度） | 症状 | 修法 | 回归证据 |
+|---|---|---|---|---|
+| 1 | **P0 判定/写回可伪造 `ok`** | 引用范围被**截断**到文件外后：`judge` 能判 `error`，但 `commit` 沿用越界旧 `range` 重算 `src_hash` —— `hashRange` 用 `slice()` **静默截断**，范围全在文件外时返回**空串 sha256**；下一次 read 步骤 4 比较"空串 === 空串" ⇒ **`ok`**。"引用目标已消失"被工具自己盖章"可直接用"，违反题面 §2.4「整段被替换或删除 ⇒ error」与"绝不判为可用" | 两道闸：① `src/judge.ts` 新增**步骤 3.5** `v.range[1] > countLines(工作区)` ⇒ `error`（并如实带上 `dirty`）；② `src/commit.ts` 新增**校验 5** 同判据 ⇒ `CommitRejected`（码 4），`.gmd` 逐字节不变 | `tests/judge.test.ts` 用例 24；`tests/commit.test.ts` 用例 25（含"拒绝后必须仍是 error、不得凭空多版本"） |
+| 2 | **P1 元数据可读出仓库外文件** | `hist[].path` 只挡了绝对路径与反斜杠，没挡 `..`：一份 `path: "../../secret.txt"` 的 `.gmd` 让 `gmd read` 把**仓库外**文件内容当 `currentSource` 回显（实测拿到 `TOP_SECRET_LINE`）。`.gmd` 是给 AI 读的、可能由模型生成 ⇒ 等于开了任意文件读取 | ① `src/format.ts` 的 `validateVersion` 改调 `gitrepo.isRepoRelativePath`（**唯一实现**）：拒绝绝对路径 / 盘符 / 反斜杠 / `..` / `.` / 空段（格式错，码 2）；② `src/gitrepo.ts` 新增 `RepoPathError` + `resolveInRepo`，`worktreePath` 与 `log --path` 全部走它兜底 | `tests/format.test.ts` 用例 27（5 种非法路径全部码 2 且 stdout 为空） |
+| 3 | **P2 正文里的标记字面量被判格式损坏** | 块正文在**围栏代码块**里写 `<!-- gmd:block … -->`（讲格式的文档必然这么写）⇒ 误判"片段嵌套 / 未闭合"（码 2），工具没法给自己写文档；与题面"普通 Markdown 阅读体验不应被明显破坏"冲突 | `src/format.ts` 新增 `scanFenceSpans`：**已闭合**的 ```/~~~ 围栏区间内的标记字面量一律跳过；未闭合的围栏不入表（不得吞掉真标记） | `tests/format.test.ts` 用例 26（含标记字面量的正文可写入、可读回、仍判 `ok`） |
+
+顺带清掉：`judge.ts` 里 `pathEverExisted` 分支**不可达**（步骤 1 已保证文件存在），其"引用目标曾被删除 / 从未存在"的区分永远不生效 —— 改为真正的 TOCTOU 兜底（步骤 1 之后文件被删 ⇒ 报"引用文件不存在"），并删掉该 git 调用；`cli.ts` 补 `-h` 短选项。
+
+**第二轮明确未做**（如实登记，答辩须能正面回答）：
+
+- **`read --version <rev>` 取不回历史正文**（题面参考接口把 `--version` 列在 `read` 下，用途是"取正文与严重度"；本实现只存 `text_hash`，故只回"该版本的来源与摘要信息"）。见 README §5.3 的自觉取舍。
+- **`error`（来源文件被删 / 引用范围消失）没有"重写后写回"的出路**：阶段 1–3 的 `range` 只能沿用，需 `--path/--range` 重新绑定引用才好闭环。
+- **`--allow-dirty` 版本的 `commit`（HEAD）与 `src_hash`（脏工作区）不同源**，审计上不自洽（`note=based_on_dirty` 已标注语义）。
+- **`commit` 会重渲染所有块的元数据头，未知扩展字段被静默丢弃**（前向兼容隐患）。
+- **`read --plain` 对 `error` 块仍输出块自身正文**（冲突视图只隐藏"来源当前内容"）。
+
+**修复后全量复跑**：`--test` **33/33 通过**（原 29 + 新增 4）；`scripts/setup-fixtures.ts` 幂等重建 OK。
