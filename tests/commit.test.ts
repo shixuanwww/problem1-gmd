@@ -14,6 +14,7 @@ import {
   blockOf,
   cli,
   docPath,
+  editBlockHead,
   freshRepo,
   outsideText,
   parseJson,
@@ -303,6 +304,70 @@ test('用例 28：来源被删的 error 块，用 --path/--range 重绑定到仍
 
   // 片段级独立：b2 没被重绑定，仍是 error
   assert.equal(blockOf(parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out), 'b2').severity, 'error');
+});
+
+/**
+ * 用例 33（前向兼容）：`commit` **只重写目标片段**，且**不丢扩展字段**。
+ *
+ * 格式带 `gmd:1` 版本号 ⇒ 将来一定会有本工具不认识的字段。修复前 `serializeGmd` 把**每个**
+ * 片段都重新渲染：① 其它块的元数据行被"规范化"（键序变化、扩展字段被抹掉），diff 变脏，
+ * 与"commit 只改目标片段"的说法不符；② 连**被改的那一块**自己的扩展字段也一起丢了 ——
+ * 对"版本 1 的工具读版本 2 的文件"来说，这是**静默数据丢失**，比报错更糟。
+ * 现在：其它片段按原文**逐字节拷贝**，目标片段的扩展字段（块头级 + 版本级）原样合并回写。
+ */
+test('用例 33：commit 只重写目标片段；块头级与版本级的扩展字段都不丢', async () => {
+  const { repo } = await freshRepo();
+  const headLine = (text: string, id: string): string => {
+    const line = text.split('\n').find((l) => l.startsWith(`<!-- gmd:block {"id":"${id}"`));
+    assert.ok(line !== undefined, `找不到 ${id} 的块头`);
+    return line;
+  };
+  const docHead = (text: string): string => {
+    const line = text.split('\n').find((l) => l.startsWith('<!-- gmd:doc '));
+    assert.ok(line !== undefined, '找不到文档头');
+    return line;
+  };
+
+  // 造"未来版本写入的字段"：b1 块头一个、b1 的 hist[0] 一个、b2 块头一个
+  const withExt = editBlockHead(
+    editBlockHead(readText(docPath(repo)), 'b1', (h) => {
+      h.future_block = 'keep';
+      (h.hist as Array<Record<string, unknown>>)[0].future_ver = 'keep';
+    }),
+    'b2',
+    (h) => {
+      h.future_b2 = 'keep';
+    },
+  );
+  writeText(docPath(repo), withExt);
+  // 文档头也塞一个未来字段（文档头从不参与重渲染，应当天然逐字节保留）
+  const withDocExt = withExt.replace('"gmd":1,', '"gmd":1,"future_doc":"keep",');
+  assert.notEqual(withDocExt, withExt, '替换必须生效');
+  writeText(docPath(repo), withDocExt);
+
+  // 前置：不认识 ≠ 报错，也 ≠ 影响判定
+  const before = blockOf(parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out), 'b1');
+  assert.equal(before.severity, 'ok', '扩展字段不得影响判定');
+  const b2HeadBefore = headLine(withDocExt, 'b2');
+
+  await prepareWarning(repo);
+  const draft = await makeDraft(repo, 'b1');
+  replaceDraftBody(draft, NEW_BODY);
+  assert.equal((await cli(['commit', 'docs/api.gmd', '--block', 'b1', '--repo', repo, '--input', draft])).code, 0);
+
+  const after = readText(docPath(repo));
+  assert.equal(headLine(after, 'b2'), b2HeadBefore, '其它片段的块头必须逐字节不变（commit 只改目标片段）');
+  assert.equal(docHead(after), docHead(withDocExt), '文档头也必须逐字节不变');
+
+  const b1Head = headLine(after, 'b1');
+  assert.match(b1Head, /"future_block":"keep"/, '块头级扩展字段不得被丢弃');
+  assert.match(b1Head, /"future_ver":"keep"/, '版本级扩展字段不得被丢弃');
+  assert.match(b1Head, /"rev":2/, '目标片段本身照常追加新版本');
+
+  // 写回后仍然自洽可读（扩展字段不能把格式搞坏）
+  const afterRead = blockOf(parseJson((await cli(['read', 'docs/api.gmd', '--json', '--repo', repo])).out), 'b1');
+  assert.equal(afterRead.severity, 'ok');
+  assert.equal(afterRead.rev, 2);
 });
 
 /**

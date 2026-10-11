@@ -7,14 +7,39 @@
  *  3. JSON 内不得出现裸 `--`（序列化时转义为 \u002d\u002d；解析时注释被提前截断 → JSON 解析失败 → 格式损坏）。
  */
 
-import { GmdFormatError } from './types.ts';
-import type { GmdBlock, GmdDoc, GmdVersion, ParsedGmd } from './types.ts';
+import { EXTRAS, GmdFormatError } from './types.ts';
+import type { GmdBlock, GmdDoc, GmdVersion, ParsedGmd, WireBlock } from './types.ts';
 // 🔒 路径纪律与 gitrepo 共用**同一份**判定（仓库纪律：一个口径只有一份实现），
 // 不在这里另抄一遍。见 gitrepo.ts 的 isRepoRelativePath / resolveInRepo。
 import { isRepoRelativePath, textHash } from './gitrepo.ts';
 
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const HASH_RE = /^sha256:[0-9a-f]{64}$/;
+
+/** 本工具**认识**的字段；其余一律当扩展字段原样保留（前向兼容）。 */
+const KNOWN_VERSION_KEYS = new Set(['rev', 'at', 'path', 'range', 'commit', 'src_hash', 'text_hash', 'text', 'note']);
+const KNOWN_BLOCK_KEYS = new Set(['id', 'hist']);
+
+/**
+ * 收集 `src` 里本工具不认识的字段（前向兼容：不认识 ≠ 丢弃）。
+ *
+ * 🔒 用 `Object.defineProperty` 而不是 `bag[k] = v`：`JSON.parse('{"__proto__":{...}}')` 会造出
+ * 一个**自有**属性 `__proto__`，而普通赋值会走它的 setter、直接改写原型链。这里只建自有属性。
+ */
+function collectExtras(src: Record<string, unknown>, known: Set<string>): Record<string, unknown> | null {
+  let bag: Record<string, unknown> | null = null;
+  for (const key of Object.keys(src)) {
+    if (known.has(key)) continue;
+    if (bag === null) bag = {};
+    Object.defineProperty(bag, key, { value: src[key], enumerable: true, writable: true, configurable: true });
+  }
+  return bag;
+}
+
+/** 已知字段在前、扩展字段在后（合并顺序即序列化后的键序，稳定可复现）。 */
+function mergeExtras(base: Record<string, unknown>, extras: Record<string, unknown> | undefined): Record<string, unknown> {
+  return extras === undefined ? base : { ...base, ...extras };
+}
 
 /** 匹配三种标记：doc / block 开 / block 闭。JSON 允许跨多行。 */
 const MARKER_RE = /<!--\s*(\/?)\s*gmd:(doc|block)\b\s*([\s\S]*?)-->/g;
@@ -205,6 +230,9 @@ function validateVersion(raw: unknown, index: number, line: number): GmdVersion 
   const out: GmdVersion = { rev, at, path, range: [l0, l1], commit, src_hash, text_hash };
   if (typeof text === 'string') out.text = text;
   if (typeof note === 'string') out.note = note;
+  // 前向兼容：本工具不认识的字段**原样留着**，写回时再合并回去（不做静默丢弃）。
+  const extras = collectExtras(v, KNOWN_VERSION_KEYS);
+  if (extras !== null) out[EXTRAS] = extras;
   return out;
 }
 
@@ -268,7 +296,11 @@ export function parseGmd(raw: string): ParsedGmd {
     // 正文 = 两标记之间的全部内容，去掉首尾各一个换行（与 commit 共用唯一实现）
     const body = normalizeBlockBody(text.slice(open.end, mk.start));
 
-    blocks.push({ id: head.id, hist, text: body, lineStart: open.line });
+    const block: GmdBlock = { id: head.id, hist, text: body, lineStart: open.line };
+    // 块头里除 id / hist 之外的字段同样原样保留（前向兼容）
+    const blockExtras = collectExtras(head, KNOWN_BLOCK_KEYS);
+    if (blockExtras !== null) block[EXTRAS] = blockExtras;
+    blocks.push(block);
     open = null;
   }
 
@@ -292,18 +324,34 @@ export function renderDocHead(doc: GmdDoc): string {
   return `<!-- gmd:doc ${escapeDashes(JSON.stringify(doc))} -->`;
 }
 
-export function renderBlockHead(id: string, hist: GmdVersion[]): string {
-  return `<!-- gmd:block ${escapeDashes(JSON.stringify({ id, hist }))} -->`;
+/** 一条版本记录的**线上形状**：已知字段按固定顺序在前，扩展字段合并在后。 */
+function wireVersion(v: GmdVersion): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    rev: v.rev,
+    at: v.at,
+    path: v.path,
+    range: v.range,
+    commit: v.commit,
+    src_hash: v.src_hash,
+    text_hash: v.text_hash,
+  };
+  if (typeof v.text === 'string') base.text = v.text;
+  if (typeof v.note === 'string') base.note = v.note;
+  return mergeExtras(base, v[EXTRAS]);
 }
 
-export function renderBlock(block: { id: string; hist: GmdVersion[]; text: string }): string {
-  return `${renderBlockHead(block.id, block.hist)}\n${block.text}\n${BLOCK_CLOSE}`;
+export function renderBlockHead(id: string, hist: GmdVersion[], extras?: Record<string, unknown>): string {
+  return `<!-- gmd:block ${escapeDashes(JSON.stringify(mergeExtras({ id, hist: hist.map(wireVersion) }, extras)))} -->`;
+}
+
+export function renderBlock(block: WireBlock): string {
+  return `${renderBlockHead(block.id, block.hist, block[EXTRAS])}\n${block.text}\n${BLOCK_CLOSE}`;
 }
 
 /** 从零拼一份 .gmd（供 fixture 脚本与 README「快速开始」的最小骨架使用）。 */
 export function buildGmd(
   doc: GmdDoc,
-  blocks: Array<{ id: string; hist: GmdVersion[]; text: string }>,
+  blocks: WireBlock[],
   tail = '',
 ): string {
   const parts = [renderDocHead(doc), ''];
@@ -338,8 +386,13 @@ function scanBlockSpans(text: string): Span[] {
 /**
  * 就地重写：只替换各片段所占区间（标记 + 正文），**块外文本逐字节保留**（仅把换行统一为 \n）。
  * 片段顺序与个数必须与原文一致（commit 只改内容，不增删片段）。
+ *
+ * `rewriteIds`：只重写这些 id 的片段，其它片段**按原文逐字节拷贝**。
+ * 为什么要有它：重渲染会把块头 JSON 规范成"已知字段在前的紧凑形式"，
+ * 于是"改一个块"会顺手改写**其它块**的元数据行（键序变化、扩展字段被规范化）——
+ * 那既让 diff 变脏，也和"commit 只改目标片段"的说法不符。不传 = 全部重写（建新文档时用）。
  */
-export function serializeGmd(raw: string, blocks: Array<{ id: string; hist: GmdVersion[]; text: string }>): string {
+export function serializeGmd(raw: string, blocks: WireBlock[], rewriteIds?: readonly string[]): string {
   const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
   const spans = scanBlockSpans(text);
   if (spans.length !== blocks.length) {
@@ -349,7 +402,8 @@ export function serializeGmd(raw: string, blocks: Array<{ id: string; hist: GmdV
   let cursor = 0;
   for (let i = 0; i < spans.length; i++) {
     out += text.slice(cursor, spans[i].start);
-    out += renderBlock(blocks[i]);
+    const rewrite = rewriteIds === undefined || rewriteIds.includes(blocks[i].id);
+    out += rewrite ? renderBlock(blocks[i]) : text.slice(spans[i].start, spans[i].end);
     cursor = spans[i].end;
   }
   out += text.slice(cursor);

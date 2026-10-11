@@ -5,6 +5,17 @@
  * 能把它整体擦除。禁 `enum` / `namespace` / 装饰器 / 构造函数参数属性。
  */
 
+/**
+ * 解析时保留的**未知扩展字段**的挂载点（前向兼容，见 `GmdVersion` / `GmdBlock`）。
+ *
+ * 为什么用 **Symbol 键**而不是普通字段（如 `extra`）：
+ *  1. 不可能与 JSON 里真实存在的字段重名（`extra` 完全可能被将来的格式占用）；
+ *  2. `JSON.stringify` **天然忽略 Symbol 键** ⇒ 扩展字段绝不会被顺手序列化出去，
+ *     只有 `renderBlockHead` 里那一次**显式合并**能把它写回文件。
+ * 代价：`Object.keys()` 看不到它，所以要用 `EXTRAS` 显式取。
+ */
+export const EXTRAS: unique symbol = Symbol('gmd.extras');
+
 // ---------- 版本（片段的一次生成记录）----------
 export interface GmdVersion {
   rev: number; // 单调递增，从 1 开始；= hist 下标 + 1
@@ -28,6 +39,8 @@ export interface GmdVersion {
    */
   text?: string;
   note?: string; // 可选备注（序列化时须转义 "--"）
+  /** 本工具不认识、但**原样保留**的扩展字段（前向兼容；写回时合并在已知字段之后）。 */
+  [EXTRAS]?: Record<string, unknown>;
 }
 
 // ---------- 片段 ----------
@@ -36,6 +49,16 @@ export interface GmdBlock {
   hist: GmdVersion[]; // 只追加，长度 >= 1
   text: string; // 活动版本的正文（hist 最后一条对应的正文）
   lineStart: number; // 解析信息：块起始行（报错用）
+  /** 块头里除 `id` / `hist` 之外的扩展字段（前向兼容，原样保留）。 */
+  [EXTRAS]?: Record<string, unknown>;
+}
+
+/** 可写回的片段形状：解析结果 `GmdBlock` 与 `commit` 新构造的对象都符合它。 */
+export interface WireBlock {
+  id: string;
+  hist: GmdVersion[];
+  text: string;
+  [EXTRAS]?: Record<string, unknown>;
 }
 
 // ---------- 文档 ----------

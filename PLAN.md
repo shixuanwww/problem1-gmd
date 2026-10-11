@@ -289,7 +289,8 @@ export class GmdFormatError extends Error {
 | `--` 转义 | 对 JSON 文本调用 `json.replace(/--/g, '\\u002d\\u002d')`（**只影响 JSON 字面量，不影响正文**） |
 | 块外文本 | **原样保留**（重写文件时保留块外内容；换行按下一行规则统一为 `\n`） |
 | 换行 | **一律以 `\n` 落盘**（写文件时把正文与块外文本中的 `\r\n` / `\r` 归一化为 `\n`）；配合 §7 的 `.gitattributes`（`*.gmd text eol=lf`）保证 checkout 不改换行，`text_hash` / `hashRange` 才稳定 |
-| 块顺序 | 保持块在文件中的原有顺序；`commit` 只改目标块的 `hist` 与正文 |
+| 块顺序 | 保持块在文件中的原有顺序；`commit` 只改目标块的 `hist` 与正文，**其它片段按原文逐字节拷贝**（不重渲染 ⇒ 它们的键序与扩展字段都不动） |
+| 前向兼容（2026-10-11 第四轮新增） | 本工具**不认识的字段一律原样保留**（`gmd:doc` / 块头 / 版本记录三层皆是），写回时合并在已知字段之后。实现上挂在 `EXTRAS`（Symbol 键）上：不可能与 JSON 字段重名，且 `JSON.stringify` 天然忽略它 ⇒ 只有 `renderBlockHead` 那一次显式合并能把它写回文件。**为什么不能"不认识就丢"**：格式带 `gmd:1` 版本号，将来必有新字段，"老工具改新文件"若静默丢字段，比报错更糟（题面要求损坏必须报错，但扩展字段不是损坏）。`serializeGmd(raw, blocks, rewriteIds?)` 的第三参数即"只重写这些片段" |
 
 ---
 
@@ -501,7 +502,7 @@ export class GmdFormatError extends Error {
 
 1. 重新读取来源：`commit = git rev-parse HEAD`，`src_hash = hashRange(当前文件文本, range)`（§4.3 的唯一实现，**不得**另写一份），`range` **沿用它记录的旧范围**（阶段 1–3 不做符号级引用 —— 那是阶段 4）；
 2. `hist.push({ rev: last.rev + 1, at: now(), path, range, commit, src_hash, text_hash, text })`（`text_hash = textHash(新正文)`，§3.3；`text = normalizeNewlines(新正文)` —— 阶段 4·3 起**历史正文随版本落盘**，见 §4.7）；
-3. 用**新正文**（**已剥离草稿头**）就地替换该块正文，其余内容**逐字节保留**（换行按 §3.4 统一为 `\n`；仓库 LF 时等价）；
+3. 用**新正文**（**已剥离草稿头**）就地替换该块正文，其余内容**逐字节保留**（换行按 §3.4 统一为 `\n`；仓库 LF 时等价）。实现上 `serializeGmd(raw, blocks, [目标块 id])`：**只重写目标片段**，其它片段与文档头按原文拷贝，扩展字段原样保留（§3.4 前向兼容）；
 4. 原子写：写 `.tmp` → `rename`（避免中途崩溃造成半截文件）；
 5. 输出新版本号（`--json` 给结构）。
 
@@ -735,6 +736,7 @@ node --experimental-strip-types --test tests/*.test.ts
 | **30**（回归·闸门漏洞，本轮新增） | **手改正文**让 b1 本身变成 `error`，同时来源范围有未提交修改 ⇒ `commit --input -` | **码 4**（`/未提交修改/`）、文件逐字节不变。**修复前** `commit` 取 `judgeBlock(...).dirty`，而该函数在步骤 0 场景返回 `dirty=false` ⇒ "先把正文手改坏再 commit"能绕过脏来源闸门，违反"引用范围内有未提交修改 ⇒ 不允许写回" |
 | **31**（阶段 4·3，本轮新增） | 造出 rev1→rev2 后：`read --version 1 --block b1 --json` / `--plain` / 人读视图；再取 rev2 | `text` = **rev1 当时写下的正文**（不得拿活动正文冒充）；`active_severity` 标注的是活动版本（rev2 已 `ok`）；`--plain --version 1` 只出该版正文、不混进 rev2 内容；不带 `note` 的版本不凭空多出该字段 |
 | **32**（阶段 4·3 边界，本轮新增） | ① 手改 `hist[0].text` 但不改 `text_hash`；② 删掉 `text` 字段（模拟旧格式 / 手写骨架） | ① **码 2**（"text 与 text_hash 不一致"+行号）；② 仍能 `read` 且 `ok`，`read --version 1 --json` 给 `text: null`、`--version 1 --block b1 --plain` 的 stdout 为空 + stderr 说明"未存正文"（**不改退出码**）；不给 `--block` 时其余块的正文照常输出 |
+| **33**（前向兼容，本轮新增） | 给 `gmd:doc` / b1 块头 / b1 的 `hist[0]` / b2 块头各塞一个本工具不认识的字段，再对 b1 走一次 `edit → commit` | ① 加扩展字段**不影响判定**（b1 仍 `ok`）；② **b2 的块头与文档头逐字节不变**（`commit` 只重写目标片段）；③ b1 自己的**块头级与版本级扩展字段都不丢**（`future_block` / `future_ver` 仍在），且 b1 照常 `rev 2`、写回后仍 `ok` |
 
 > 🔴 **用例 0 不是"随便跑一下"，是 3/5/7/13/16 的**前置条件**：演示与测试里每一次"改源文件"之后，都必须**显式提交**（见 §9.2 / §9.3 的注解），否则 dirty 短路让这些用例断言失败。**全文唯一允许不提交源改动的地方是用例 6、用例 14 与用例 23**（23 只改换行字节：CRLF 工作区 vs LF HEAD，属"换行不构成 dirty"）。**
 
@@ -860,6 +862,7 @@ node --experimental-strip-types demo/warning-loop.ts         # 阶段 3：无人
 | 引用范围存在性（本次复核新增） | 判定侧 §4.3 步骤 3.5 + 写回侧 §4.6.2 校验 5：`countLines(来源) < range[1]` ⇒ 判定 `error` / 写回拒（码 4）。理由：`hashRange` 对越界 range **静默截断**成空串哈希，会与"范围内是空内容"不可区分 ⇒ 沿用越界 range 写回会把 `error` 伪造成 `ok`（§4.3 / §4.6.2 / §8 用例 24、25） |
 | 来源路径必须落在仓库内（本次复核新增） | `hist[].path` 拒绝绝对路径 / 盘符 / 反斜杠 / `..` / `.` / 空段 ⇒ 格式错（码 2）；`gitrepo.resolveInRepo` 再兜底。理由：否则一份 `.gmd` 就能让 `gmd read` 把仓库外文件内容当"来源当前内容"回显（§3.1 / §4.1 / §8 用例 27） |
 | 引用重绑定（阶段 4·2，本轮新增） | `commit --path <src>` / `--range <a..b>`：本版本改指到仍存在的来源，`targetPath/targetRange` 缺省沿用活动版本。`--path` 必须仓库内相对路径（否则**码 1**）、`--range` 须 1-based 闭区间（否则**码 1**）；新来源不存在 / 范围越界 / 范围脏 ⇒ **码 4**。只影响本版本，`hist` 里旧版本绑定不改写（§4.6.2 / §8 用例 28、29） |
+| 扩展字段（前向兼容，本轮新增） | 本工具不认识的字段一并**原样保留**（`gmd:doc` / 块头 / 版本记录三层），挂在 `EXTRAS`（Symbol 键）上、写回时显式合并；`serializeGmd(raw, blocks, rewriteIds?)` 只重写 `rewriteIds` 里的片段，其余按原文逐字节拷贝。**不做**"不认识就报错"（扩展字段不是损坏），也**不做**静默丢弃（§3.4 / §8 用例 33） |
 
 ---
 

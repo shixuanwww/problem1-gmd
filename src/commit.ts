@@ -192,12 +192,12 @@ export async function commitBlock(opts: CommitOptions): Promise<CommitResult> {
   };
   if (dirty) version.note = 'based_on_dirty';
 
+  // 目标块：`{ ...b }` 保留它的块头扩展字段（EXTRAS 是 Symbol 键，展开才带得走）；
+  // 其它块原样传入 —— `serializeGmd` 只重写 `rewriteIds` 里的片段，其余逐字节拷贝。
   const blocks = parsed.blocks.map((b, i) =>
-    i === idx
-      ? { id: b.id, hist: [...b.hist, version], text: normalizeNewlines(newBody) }
-      : { id: b.id, hist: b.hist, text: b.text },
+    i === idx ? { ...b, hist: [...b.hist, version], text: normalizeNewlines(newBody) } : b,
   );
-  const out = serializeGmd(raw, blocks);
+  const out = serializeGmd(raw, blocks, [block.id]);
 
   // ---- 原子写：.tmp → rename（避免中途崩溃留下半截文件）----
   const tmp = `${opts.repo}/${opts.docRel}.tmp`;
